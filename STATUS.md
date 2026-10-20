@@ -8,8 +8,9 @@ Single source of truth for where the build is. Update after every component.
 
 ## Resume here
 
-**Current phase:** 6 — Scheduler done + **checkpointing at every stage and agent** (161 passing; resume verified live) → Phase 7 — Frontend
-**Next step:** rerun the watchlist E2E on Claude (API + worker + scheduler, `WATCHLIST_INTERVAL_OVERRIDE_S=240`; expect baseline then a diff/alert), then Phase 7 (Next.js).
+**Current phase:** 7 — Frontend **done** (Next.js 16, browser-verified against live data); Phase 6 **verified live** → Phase 8 — Evals + README
+**Next step:** Phase 8: 5 sample briefs + eval runner (fact-check pass rate, citation accuracy, synthesis quality), README (setup, keys, env reference, architecture diagram, context-engineering writeup with run 17's numbers, sample report, walkthrough), Dockerfiles + compose services. Carry-over quality items: see "Phase 8 backlog" in the log.
+**Run the UI:** `cd frontend && npm run dev` (http://localhost:3000; API at `NEXT_PUBLIC_API_URL`, default http://localhost:8000) — start the API, worker and (optionally) scheduler first.
 **Resume a failed run:** `uv run insightforge --resume <run-id>` · API `POST /research/{id}/retry` · the worker auto-resumes retryable failures once.
 **Models:** back on Claude (`anthropic/claude-sonnet-5.5` / `-haiku-5.5`). Cheap verified alternative in `.env` comments: `deepseek/deepseek-v4.1-flash` / `z-ai/glm-5.3-flash`.
 **Optional:** `brew install pango` to enable PDF export (otherwise `/export?format=pdf` returns 501 with this hint).
@@ -84,17 +85,17 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started. Numbers in brackets are
 - Not done here (Phase 8): Dockerfiles + compose services for api/worker/frontend
 
 ### Phase 6 — Scheduler
-- 🔨 6.0 Live E2E pending (see log)
+- ✅ 6.0 Live E2E on Claude (see log)
 - ✅ 6.1 Watchlist CRUD + scheduler worker [20]
 - ✅ 6.2 Diff Agent [21] + alerts
 - ✅ 6.3 Webhook guard + Slack delivery [03d]
 
 ### Phase 7 — Frontend (Next.js)
-- ⬜ 7.1 Brief input panel
-- ⬜ 7.2 Live progress view
-- ⬜ 7.3 Report viewer + citation drawer
-- ⬜ 7.4 Watchlist dashboard + alert feed
-- ⬜ 7.5 Export + share
+- ✅ 7.1 Brief input panel
+- ✅ 7.2 Live progress view
+- ✅ 7.3 Report viewer + citation drawer
+- ✅ 7.4 Watchlist dashboard + alert feed
+- ✅ 7.5 Export + share
 
 ### Phase 8 — Evals + README
 - ⬜ 8.1 Five sample briefs
@@ -153,3 +154,8 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started. Numbers in brackets are
   - Entry points: `Runtime.retry` (fresh time + token budget for the attempt; `runs.attempts` counts up; no checkpoint → start over), worker auto-resume (`max_auto_resumes=1`) and `retry_run` job, `POST /research/{id}/retry` (FAILED only, ≤ `max_run_attempts`=3, conditional update), CLI `--resume RUN_ID`.
   - Time-aware rewrites: `execute` sets a deadline; stages record `stage_seconds`; `ground` skips a rewrite when another write + grounding check (+ 90 s fact-check reserve) won't fit, dropping unsupported claims instead.
   - **Live proof (run 17, Claude):** attempt 1 with `RUN_TIME_BUDGET_S=100` died during writing after plan/research/entities/synthesis (164k tokens of work). `--resume` → attempt 2 re-ran only write/ground/fact_check (3 writer attempts, 0 unsupported at the end) → COMPLETE in 125 s; finished stages untouched (identical stage token counts), ~62% of the run's tokens reused.
+- 2026-10-20 — **Phase 6 live E2E on Claude** (API + worker + scheduler, interval override 300 s): scheduler queued the topic; run 1 COMPLETE (284k tokens) → Diff Agent "saved as the baseline", no alert; next firing skipped while busy; run 2 COMPLETE (273k) → diff → alert created (webhook not configured: needs a public HTTPS receiver). Startup double-fire (stale job misfire + interval-change replace) was absorbed by the busy guard; reconcile now anchors rescheduled jobs to `last_run + interval`.
+  - **Diff Agent fixes from real data:** "changed" paired *different companies* (Gajiku vs GIMO seed rounds) and *different facts* about one company (PayrollPanda funding vs customer count). Now: a change needs a shared distinctive subject (places/filler excluded); code decides only near-identical sentences (≥ 0.92) with different figures; looser same-subject pairs go to the judge, which classifies new / changed / removed / not_material (a "change" that is really a new fact becomes an addition). Removals alone no longer alert. On the same two live reports: changed 10 → 1. The remaining 25 added / 23 removed reflect research variance between runs.
+- 2026-10-20 — **Phase 7 frontend** (`frontend/`, Next.js 16.4 + React 19.3 + Tailwind 4, Cache Components on): sign-in gate (dev login), brief panel (500-char counter, drag-drop PDFs with client checks, source toggles, ETA from `/research/estimate`), live run view (SSE snapshots + activity log, sub-task rows, progress bar, elapsed vs estimate, inline clarification, retry-from-checkpoint), report viewer from `reports.structure` (sticky TOC, confidence badges, clickable citation chips → drawer with title/date/credibility/exact source paragraph/URL, amber `[UNVERIFIED]` with tooltip, fact-check panel, md/pdf export, copy share link; markdown fallback for older reports), public `/share/[token]`, reports list, watchlist dashboard (add/pause/remove/run-now, one-click diff, alert feed, mark read). Dynamic routes: server page + `<Suspense>` + `use(params)` in a client component (Cache Components rule); EventSource closed in effect cleanup (Activity keeps hidden routes mounted). `npm run build` + lint clean. Browser-checked against live data: watchlist + diff + alert feed, report with drawer, progress replay, no console errors. Fixed from the check: drawer closes on Escape and takes focus.
+- **Phase 8 backlog (quality, found live):** (1) time horizon isn't enforced: a "last 12 months" report cited a 2022 article (the Writer flagged it under Gaps) → drop/flag evidence older than the sub-task horizon in synthesis; (2) diff noise from research variance → compare additions against all earlier reports for the item, not just the last; (3) ETA formula under-estimates Claude runs (est ~3 min, actual ~4 min) → recalibrate from eval runs; (4) fact-check pass rate across the 5 briefs (single runs: 75–100%).
+

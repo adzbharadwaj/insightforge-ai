@@ -96,7 +96,7 @@ async def process_watch_result(
     counts = (len(summary.added_findings), len(summary.changed_findings), len(summary.removed_findings))
     await log.progress("diff", f"diff vs previous report: {counts[0]} added, {counts[1]} changed, {counts[2]} removed",
                        previous_report_id=str(prev_report.id))
-    if summary.empty:
+    if not summary.alertable:
         return None
 
     alert = Alert(user_id=run.user_id, watchlist_item_id=item.id, run_id=run.id,

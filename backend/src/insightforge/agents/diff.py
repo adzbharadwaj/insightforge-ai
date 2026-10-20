@@ -14,6 +14,9 @@ Removed findings mean "not found in this run", not "no longer true": research sa
 varies run to run, which the summary says.
 """
 
+import re
+from typing import Literal
+
 import numpy as np
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -25,13 +28,31 @@ from insightforge.tools.entities import numbers_in
 SAME = 0.92  # at or above: same fact (if numbers agree)
 RELATED = 0.75  # at or above: about the same thing; below: unrelated
 
+# Names that say where, not who: sharing "Indonesia" doesn't make two funding rounds the same deal.
+_NOT_A_SUBJECT = frozenset(["The", "A", "An", "In", "On", "For", "With", "And", "Of", "To", "By", "At", "As", "From", "Its", "Their", "This", "That", "These", "Those", "It", "Southeast", "South", "East", "North", "West", "Asia", "Asian", "ASEAN", "SEA", "APAC", "Singapore", "Malaysia", "Indonesia", "Indonesian", "Philippines", "Filipino", "Thailand", "Thai", "Vietnam", "Vietnamese", "Cambodia", "Laos", "Myanmar", "Brunei", "US", "USD", "SGD", "MYR", "IDR", "PHP", "THB", "VND", "Series", "Seed"])
+_NAME = re.compile(r"\b[A-Z][A-Za-z0-9&.'-]{2,}")
+
+
+def subjects(text: str) -> set[str]:
+    """Distinctive capitalised names in a claim (companies, products, people), minus places and filler."""
+    return {m.rstrip(".'s").rstrip("'") for m in _NAME.findall(text)} - _NOT_A_SUBJECT
+
+
+def same_subject(a: str, b: str) -> bool:
+    return bool(subjects(a) & subjects(b))
+
 DIFF_PROMPT = """You decide which differences between two research reports on the same topic are material.
 
 Material: a new company, product, deal, funding round, price, regulation or figure; a number or status that
 changed; a fact that matters to a competitive-intelligence analyst. Not material: rephrasing, the same fact
 with different wording or rounding, generic statements, trivia.
-
-For each candidate, write a short reason first, then decide.
+Classify each candidate (write a short reason first):
+- "changed": the new statement updates the previous one: the same fact about the same company, product or
+  regulation, with a different value or status (e.g. funding amount, price, headcount).
+- "new": material information not in the previous report, including a different fact about the same company
+  (a [changed] candidate that is really a new fact is "new").
+- "removed": a material previous finding (only for [removed] candidates).
+- "not_material": rephrasing, rounding, generic statements or trivia.
 """
 
 
@@ -55,6 +76,11 @@ class ChangeSummary(BaseModel):
     def empty(self) -> bool:
         return not (self.added_findings or self.removed_findings or self.changed_findings)
 
+    @property
+    def alertable(self) -> bool:
+        """Removals alone don't page anyone: research samples sources differently run to run."""
+        return bool(self.added_findings or self.changed_findings)
+
 
 class Candidate(BaseModel):
     id: str
@@ -66,11 +92,16 @@ class Candidate(BaseModel):
 class Materiality(BaseModel):
     id: str
     reason: str = Field(default="", max_length=300)
-    material: bool
+    classification: Literal["changed", "new", "removed", "not_material"]
 
 
 class MaterialityVerdicts(BaseModel):
     verdicts: list[Materiality]
+
+
+def numbers_differ(a: str, b: str) -> bool:
+    na, nb = numbers_in(a), numbers_in(b)
+    return bool(na) and bool(nb) and na != nb
 
 
 def _cos(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -93,15 +124,19 @@ async def diff_claims(gateway: ModelGateway, old: list[str], new: list[str]) -> 
     for i, text in enumerate(new):
         j = int(sims[i].argmax())
         best = float(sims[i, j])
-        if best >= RELATED:
+        about_same = best >= RELATED and same_subject(text, old[j])
+        if best >= SAME and not numbers_differ(text, old[j]):
             restated.add(j)
-        if best >= RELATED and numbers_in(text) and numbers_in(old[j]) and numbers_in(text) != numbers_in(old[j]):
-            changed.append(ChangedFinding(before=old[j], after=text, reason="figures differ"))
-        elif best >= SAME:
             continue  # same fact, rephrased
-        elif best >= RELATED:
-            candidates.append(Candidate(id=f"x{i}", kind="changed", text=text, before=old[j]))
+        if about_same:
+            restated.add(j)
+            if best >= SAME and numbers_differ(text, old[j]):
+                # Near-identical sentence, different figures ("raised $7.6M" → "raised $9M"): decided in code.
+                changed.append(ChangedFinding(before=old[j], after=text, reason="figures differ"))
+            else:  # same subject, looser match: the judge decides whether it's an update or a new fact
+                candidates.append(Candidate(id=f"x{i}", kind="changed", text=text, before=old[j]))
         else:
+            # Similar wording about a different subject (e.g. another startup's seed round) is new, not a change.
             candidates.append(Candidate(id=f"x{i}", kind="added", text=text))
     for j, text in enumerate(old):
         if j not in restated and float(sims[:, j].max()) < RELATED:
@@ -114,15 +149,16 @@ async def diff_claims(gateway: ModelGateway, old: list[str], new: list[str]) -> 
         f"{c.id} [{c.kind}] {c.text}" + (f"\n    previously: {c.before}" if c.before else "") for c in candidates)
     verdicts: MaterialityVerdicts = await gateway.structured(Role.DIFF, MaterialityVerdicts).ainvoke(
         [SystemMessage(DIFF_PROMPT), HumanMessage(listing)])
-    material = {v.id: v for v in verdicts.verdicts if v.material}
+    verdict = {v.id: v for v in verdicts.verdicts}
     for c in candidates:
-        if c.id not in material:
+        v = verdict.get(c.id)
+        if v is None or v.classification == "not_material":
             continue
-        if c.kind == "added":
+        if c.kind == "removed":
+            if v.classification == "removed":
+                summary.removed_findings.append(Finding(text=c.text))
+        elif v.classification == "changed" and c.kind == "changed":
+            summary.changed_findings.append(ChangedFinding(before=c.before or "", after=c.text, reason=v.reason))
+        elif v.classification in ("new", "changed"):  # a "change" with no matching previous fact is new
             summary.added_findings.append(Finding(text=c.text))
-        elif c.kind == "removed":
-            summary.removed_findings.append(Finding(text=c.text))
-        else:
-            summary.changed_findings.append(ChangedFinding(before=c.before or "", after=c.text,
-                                                           reason=material[c.id].reason))
     return summary

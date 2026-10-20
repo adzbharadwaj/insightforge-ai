@@ -106,13 +106,21 @@ def test_slack_format():
 # --- Diff Agent ------------------------------------------------------------------------
 
 
+KIND_TO_CLASS = {"added": "new", "changed": "changed", "removed": "removed"}
+
+
 def materiality(material_ids: set[str] | None = None, seen: list | None = None):
+    """Fake judge: material candidates keep their kind; others are not material."""
     def fn(messages):
-        ids = [line.split()[0] for line in messages[-1].content.splitlines() if line and not line.startswith(" ")]
+        lines = [line for line in messages[-1].content.splitlines() if line and not line.startswith(" ")]
         if seen is not None:
             seen.append(messages[-1].content)
-        return MaterialityVerdicts(verdicts=[Materiality(id=i, material=material_ids is None or i in material_ids)
-                                             for i in ids])
+        verdicts = []
+        for line in lines:
+            cid, kind = line.split()[0], line.split()[1].strip("[]")
+            material = material_ids is None or cid in material_ids
+            verdicts.append(Materiality(id=cid, classification=KIND_TO_CLASS[kind] if material else "not_material"))
+        return MaterialityVerdicts(verdicts=verdicts)
     return fn
 
 
@@ -142,8 +150,10 @@ async def test_only_material_additions_and_removals_are_kept():
 
     def judge(messages):
         lines = [line for line in messages[-1].content.splitlines() if line and not line.startswith(" ")]
-        return MaterialityVerdicts(verdicts=[Materiality(id=line.split()[0], material="Payboy" in line or "Swingvy" in line)
-                                             for line in lines])
+        return MaterialityVerdicts(verdicts=[
+            Materiality(id=line.split()[0], classification=(KIND_TO_CLASS[line.split()[1].strip("[]")]
+                                                           if "Payboy" in line or "Swingvy" in line else "not_material"))
+            for line in lines])
 
     summary = await diff_claims(FakeGateway({}, {Role.DIFF: judge}), old, new)
     assert [f.text for f in summary.added_findings] == [new[1]]  # trivia ("helps businesses pay") dropped
@@ -209,7 +219,16 @@ async def test_change_becomes_an_alert_and_a_signed_webhook(committed_run, monke
 
     maker, user_id, _ = committed_run
     item_id = await add_item(maker, user_id, webhook_url="https://hooks.example.com/x")
-    gw = FakeGateway({}, {Role.DIFF: materiality(set())})
+
+    def judge(messages):  # an update when the figure moved; anything else is not material
+        verdicts = []
+        for line in (ln for ln in messages[-1].content.splitlines() if ln and not ln.startswith(" ")):
+            cid, kind = line.split()[0], line.split()[1].strip("[]")
+            moved = "US$9 million" in line and kind == "changed"
+            verdicts.append(Materiality(id=cid, classification="changed" if moved else "not_material"))
+        return MaterialityVerdicts(verdicts=verdicts)
+
+    gw = FakeGateway({}, {Role.DIFF: judge})
     posted: list[httpx.Request] = []
     http = client_for(lambda request: posted.append(request) or httpx.Response(200))
     real_deliver = service.deliver
@@ -307,3 +326,82 @@ def test_production_scheduler_never_doubles_up_runs():
 
     defaults = build_scheduler(Settings(_env_file=None, scheduler_misfire_grace_s=900))._job_defaults
     assert defaults == {"coalesce": True, "max_instances": 1, "misfire_grace_time": 900}
+
+
+async def test_cadence_change_keeps_the_schedule_anchored_to_the_last_run(committed_run, monkeypatch):
+    from apscheduler.jobstores.memory import MemoryJobStore
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from insightforge.watchlist import scheduler as sched
+
+    maker, user_id, _ = committed_run
+    monkeypatch.setattr(sched, "get_sessionmaker", lambda: maker)
+    ran = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
+    item_id = await add_item(maker, user_id, last_run=ran)
+    scheduler = AsyncIOScheduler(jobstores={"default": MemoryJobStore()}, timezone=dt.UTC)
+    scheduler.start(paused=True)
+    try:
+        await sched.reconcile(scheduler)
+        nxt = scheduler.get_job(f"watch:{item_id}").next_run_time
+        assert abs((nxt - (ran + dt.timedelta(days=1))).total_seconds()) < 5  # not "now"
+    finally:
+        scheduler.shutdown(wait=False)
+
+
+async def test_different_companies_are_never_a_change():
+    """Live regression: two startups' seed rounds were reported as one 'changed' finding."""
+    old = ["GIMO, a Vietnamese payroll startup, raised $1.9M in seed funding led by Singapore's Integra Partners."]
+    new = ["Gajiku, an Indonesia-based earned wages startup, raised US$1.1 million in a seed round led by AC Ventures."]
+    summary = await diff_claims(FakeGateway({}, {Role.DIFF: materiality()}), old, new)
+    assert not summary.changed_findings
+    assert [f.text for f in summary.added_findings] == new
+
+
+def test_subjects_ignore_places_and_filler():
+    from insightforge.agents.diff import same_subject, subjects
+
+    assert subjects("Salary Hero raised US$7.6 million in Thailand.") == {"Salary", "Hero"}
+    assert same_subject("Salary Hero raised US$7.6M.", "Salary Hero's Series A was US$9M.")
+    assert not same_subject("GIMO raised in Vietnam.", "Gajiku raised in Indonesia.")
+
+
+async def test_removals_alone_do_not_alert(committed_run, monkeypatch):
+    from insightforge.agents.diff import ChangeSummary, Finding
+    from insightforge.watchlist import service
+
+    maker, user_id, _ = committed_run
+    item_id = await add_item(maker, user_id)
+    first = await complete_watch_run(maker, user_id, item_id, ["Salary Hero raised US$7.6 million in a Series A."])
+    await process_watch_result(maker, FakeGateway({}, {}), client_for(lambda r: httpx.Response(200)), first)
+    second = await complete_watch_run(maker, user_id, item_id, ["Talenox serves SMBs in Singapore."])
+
+    async def only_removed(gateway, old, new):
+        return ChangeSummary(removed_findings=[Finding(text=old[0])])
+
+    monkeypatch.setattr(service, "diff_claims", only_removed)
+    assert await process_watch_result(maker, FakeGateway({}, {}), client_for(lambda r: httpx.Response(200)), second) is None
+
+
+
+async def test_same_company_different_fact_is_new_not_changed():
+    """Live regression: 'PayrollPanda secured US$700,000 seed' was reported as a change of its customer count."""
+    old = ["PayrollPanda is part of LaunchPad and claims over 1,000 customers across Malaysia."]
+    new = ["PayrollPanda, a payroll software startup in Malaysia, secured US$700,000 in seed funding."]
+
+    def judge(messages):  # a judge that recognises the candidate is a new fact about the same company
+        cid = messages[-1].content.split()[0]
+        return MaterialityVerdicts(verdicts=[Materiality(id=cid, reason="different fact", classification="new")])
+
+    summary = await diff_claims(FakeGateway({}, {Role.DIFF: judge}), old, new)
+    assert not summary.changed_findings and [f.text for f in summary.added_findings] == new
+
+
+async def test_near_identical_sentence_with_new_figure_is_changed_without_the_model():
+    old = ["Salary Hero raised US$7.6 million in a Series A round led by Cento Ventures."]
+    new = ["Salary Hero raised US$9 million in a Series A round led by Cento Ventures."]
+
+    def no_model(messages):
+        raise AssertionError("must be decided in code")
+
+    summary = await diff_claims(FakeGateway({}, {Role.DIFF: no_model}), old, new)
+    assert [(c.before, c.after) for c in summary.changed_findings] == [(old[0], new[0])]

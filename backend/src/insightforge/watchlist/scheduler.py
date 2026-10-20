@@ -61,7 +61,10 @@ async def reconcile(scheduler: AsyncIOScheduler) -> None:
         job = scheduler.get_job(job_id, jobstore="default")
         if job is not None and getattr(job.trigger, "interval", None) == every:
             continue
-        first = item.next_run if item.next_run and item.next_run > now else now + dt.timedelta(seconds=2)
+        # Never run → fire right away (baseline). Otherwise anchor to the last run, so changing the cadence (or
+        # restarting the scheduler) doesn't trigger an extra run.
+        soon = now + dt.timedelta(seconds=2)
+        first = soon if item.last_run is None else max(soon, item.last_run + every)
         scheduler.add_job(fire, IntervalTrigger(seconds=int(every.total_seconds()), start_date=first),
                           args=[str(item.id)], id=job_id, jobstore="default", replace_existing=True)
 
