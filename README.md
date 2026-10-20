@@ -32,9 +32,10 @@ itself is in [docs/sample-report.md](docs/sample-report.md).
 8. [Guardrails, budgets and recovery](#guardrails-budgets-and-recovery)
 9. [Watchlist and change detection](#watchlist-and-change-detection)
 10. [Evaluation](#evaluation)
-11. [Testing](#testing)
-12. [Project layout](#project-layout)
-13. [Known limitations](#known-limitations)
+11. [Bonus features](#bonus-features)
+12. [Testing](#testing)
+13. [Project layout](#project-layout)
+14. [Known limitations](#known-limitations)
 
 ---
 
@@ -168,6 +169,7 @@ All settings live in `backend/src/insightforge/config.py`; any of them can be se
 | `RUN_TIME_BUDGET_S` | 480 | Per-attempt time budget |
 | `RUN_TOKEN_BUDGET` | 300000 | Per-attempt token budget (measured: a clean run ≈ 185–230k) |
 | `EVIDENCE_BUNDLE_TOKEN_BUDGET` | 6000 | What the Writer may receive |
+| `ADAPTIVE_BUNDLE_BUDGET` | false | Bonus: scale that budget with sub-task count and source volume (4k–9k; a typical brief keeps 6k) |
 | `MAX_WRITER_RETRIES` | 2 | Rewrites after a failed grounding check (skipped if time or tokens can't cover one) |
 | `MAX_AUTO_RESUMES` / `MAX_RUN_ATTEMPTS` | 1 / 3 | Automatic resume of retryable failures; total attempts incl. manual retries |
 | `FACTCHECK_SAMPLE_RATIO` / `FACTCHECK_MIN_CLAIMS` / `FACTCHECK_SIMILARITY_THRESHOLD` | 0.20 / 5 / 0.85 | Fact-check sampling and pass threshold |
@@ -317,11 +319,24 @@ The other four briefs are ready to run; their results are added to `eval/report.
 
 ---
 
+## Bonus features
+
+| Bonus | How it works | Where |
+|---|---|---|
+| Contradiction resolution UI | Opt-in per run ("Let me resolve conflicting facts…" or `--review-conflicts`). After Synthesis, each entity conflict with both sides in the evidence bundle pauses the run (`AWAITING_REVIEW`, same interrupt/resume as clarification). The run page shows the versions side by side with publishers and quotes; the chosen version is kept as analyst-confirmed, the others are dropped with a logged reason, "Keep both" leaves the disagreement for the Writer. Unanswered after 30 minutes, both versions are kept and the run continues | `agents/conflict_review.py`, review node in `graph/pipeline.py`, `POST /research/{id}/resolve`, `components/run-progress.tsx` |
+| Entity graph visualizer | *Entity graph* tab on the report: force-directed layout of the 40 most connected companies, people and products; red ring = conflicting facts; clicking a node lists its facts with publishers and the report's evidence about it (each opens the citation drawer) | `components/entity-graph.tsx` |
+| Source credibility tuning | *Source settings* on the brief form: blocked domains are never fetched; deprioritized domains are used with credibility halved, which lowers their rank and confidence | `tools/credibility.py`, `tools/web_search.py` |
+| Citation trace | Click any cited sentence in the report to open the exact source paragraph it was drawn from | `components/report-viewer.tsx` |
+| Adaptive context budgets | `ADAPTIVE_BUNDLE_BUDGET=true` scales the evidence budget with sub-task count and source volume | `agents/synthesis.py` (`adaptive_budget`) |
+| LangSmith tracing | Set `LANGSMITH_TRACING=true` + key: LangChain/LangGraph trace every call (not exercised in this project's runs) | env only |
+
+---
+
 ## Testing
 
 ```bash
 cd backend
-uv run pytest -q          # 174 tests; DB/Qdrant tests skip if docker compose isn't up (they use the dev database)
+uv run pytest -q          # 183 tests; DB/Qdrant tests skip if docker compose isn't up (they use the dev database)
 uv run ruff check src tests
 cd ../frontend && npm run lint && npm run build
 ```
@@ -337,7 +352,8 @@ models. A live OpenRouter smoke test runs when a key is configured.
 
 ```
 backend/src/insightforge/
-  agents/        planner, delegation, web_search, doc_reader, entity_extractor, synthesis, writer, fact_checker, diff
+  agents/        planner, delegation, web_search, doc_reader, entity_extractor, synthesis, conflict_review, writer,
+                 fact_checker, diff
   api/           auth, research (+ SSE), reports (export, share), watchlist, users
   graph/         state.py (typed schemas), pipeline.py (LangGraph orchestrator, budgets, resume)
   guardrails/    input, untrusted, grounding, output, webhooks, net (SSRF)

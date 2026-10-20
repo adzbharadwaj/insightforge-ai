@@ -225,3 +225,37 @@ async def test_researcher_stores_top_n_replaces_skipped_and_logs(committed_run):
     text = format_for_agent(out)
     assert text.count("<untrusted_source") == 3
     assert len(text) < 3 * 700  # leads only, never full bodies
+
+
+def test_domain_settings_are_normalized():
+    from insightforge.tools.credibility import matches_domain, normalize_domains
+
+    assert normalize_domains("https://www.PRNewswire.com/news/x, medium.com\nnot a domain; prnewswire.com") == [
+        "prnewswire.com", "medium.com"]
+    assert matches_domain("https://blog.medium.com/a", {"medium.com"})
+    assert not matches_domain("https://notmedium.com/a", {"medium.com"})
+
+
+async def test_blocked_domains_are_never_fetched_and_deprioritized_rank_lower(committed_run):
+    maker, _, run_id = committed_run
+    hits = [SearchHit("https://www.prnewswire.com/a", "PR", ""), SearchHit("https://news.example.com/a", "News", ""),
+            SearchHit("https://blog.medium.com/a", "Blog", "")]
+    routes = {h.url: html(article(h.title, f"{h.title} body text about payroll pricing.")) for h in hits}
+    fetched: list[str] = []
+    fetcher = fetcher_for(routes)
+    real_fetch = fetcher.fetch
+
+    async def spy(url):
+        fetched.append(url)
+        return await real_fetch(url)
+
+    fetcher.fetch = spy
+    researcher = WebResearcher(FakeProvider(hits), fetcher, ScratchStore(maker, run_id), RunLog(maker, run_id),
+                               results_per_subtask=3, today=TODAY, blocked_domains=["prnewswire.com"],
+                               deprioritized_domains=["medium.com"])
+    out = await researcher.research("st-1", "payroll pricing")
+    assert "https://www.prnewswire.com/a" not in fetched
+    by_domain = {s.domain: s.credibility for s in out.sources}
+    baseline = WebResearcher(FakeProvider([]), fetcher, ScratchStore(maker, run_id), RunLog(maker, run_id), today=TODAY)
+    unpenalized = (await baseline._store("st-1", (await real_fetch("https://blog.medium.com/a")))).credibility
+    assert by_domain["blog.medium.com"] == round(unpenalized * 0.5, 3)  # subdomain of a deprioritized domain

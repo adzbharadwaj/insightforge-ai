@@ -35,13 +35,13 @@ class ShareLink(BaseModel):
     expires_at: str
 
 
-async def _report(request: Request, report_id: uuid.UUID, user_id: uuid.UUID | None) -> tuple[Report, str]:
+async def _report(request: Request, report_id: uuid.UUID, user_id: uuid.UUID | None) -> tuple[Report, str, dict | None]:
     async with request.app.state.sessionmaker() as session:
         report = await session.get(Report, report_id)
         if report is None or (user_id is not None and report.user_id != user_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "report not found")
-        brief = await session.scalar(select(Run.brief).where(Run.id == report.run_id))
-    return report, brief or ""
+        row = (await session.execute(select(Run.brief, Run.entity_graph).where(Run.id == report.run_id))).one()
+    return report, row.brief or "", row.entity_graph
 
 
 def _filename(title: str, ext: str) -> str:
@@ -49,7 +49,7 @@ def _filename(title: str, ext: str) -> str:
     return f"{slug}.{ext}"
 
 
-def _export(report: Report, brief: str, fmt: Format) -> Response:
+def _export(report: Report, brief: str, _graph: dict | None, fmt: Format) -> Response:
     if fmt == "md":
         return Response(report.markdown, media_type="text/markdown; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{_filename(report.title, "md")}"'})

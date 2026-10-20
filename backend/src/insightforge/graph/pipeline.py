@@ -1,7 +1,7 @@
 """LangGraph orchestrator (component 05): the control plane.
 
     load_context → plan ─┬─(question)→ clarify → plan
-                         └─(tasks)───→ research → entities → synthesize → write ⇄ ground → fact_check → finalize
+                         └─(tasks)───→ research → entities → synthesize → review → write ⇄ ground → fact_check → finalize
 
 research = wave 1 (one isolated researcher per sub-task); entities = wave 2 (one
 Entity Extractor that receives source ids only). `ground` sends the draft back to
@@ -28,6 +28,7 @@ from langgraph.types import Command, interrupt
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from insightforge.agents.conflict_review import KEEP_BOTH, apply_decisions, build_reviews
 from insightforge.agents.delegation import ResearchRecorder
 from insightforge.agents.entity_extractor import run_entity_wave
 from insightforge.agents.fact_checker import FactChecker
@@ -39,7 +40,7 @@ from insightforge.agents.planner import (
     plan,
     run_research,
 )
-from insightforge.agents.synthesis import Synthesizer
+from insightforge.agents.synthesis import Synthesizer, adaptive_budget
 from insightforge.agents.writer import render_report, write_report
 from insightforge.config import Settings
 from insightforge.graph.state import FactCheckSummary, PipelineState
@@ -187,13 +188,39 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
     async def synthesize(state: PipelineState) -> dict:
         await set_run(deps, state.run_id, status=RunStatus.SYNTHESIZING)
         ctx = deps.context(state.run_id, state.user_id)
+        budget = s.evidence_bundle_token_budget
+        if s.adaptive_bundle_budget:
+            n_sources = len({ref.source_id for r in state.research_results for ref in r.refs})
+            budget = adaptive_budget(budget, len(state.task_graph.sub_tasks), n_sources,
+                                     s.adaptive_budget_min, s.adaptive_budget_max)
+            await ctx.log.progress("synthesis", f"adaptive evidence budget: {budget:,} tokens "
+                                                f"({len(state.task_graph.sub_tasks)} sub-tasks, {n_sources} sources)")
         result = await Synthesizer(
-            deps.gateway, ctx.resolver, ctx.log, token_budget=s.evidence_bundle_token_budget,
+            deps.gateway, ctx.resolver, ctx.log, token_budget=budget,
             passages_per_source=s.synthesis_passages_per_source, high_credibility=s.high_credibility_threshold,
         ).run(state.brief, state.task_graph.sub_tasks, state.research_results, state.entity_graph)
         if not result.bundle.sections:
             return {"status": RunStatus.FAILED, "error": "synthesis found no usable evidence"}
         return {"evidence_bundle": result.bundle, "status": RunStatus.SYNTHESIZING}
+
+    async def review(state: PipelineState) -> dict:
+        """Opt-in contradiction resolution: pause so the analyst picks a side for each conflicting fact."""
+        if not state.source_prefs.get("review_conflicts"):
+            return {}
+        reviews = build_reviews(state.evidence_bundle, state.entity_graph)
+        if not reviews:
+            return {}
+        payload = {"type": "review", "conflicts": [r.model_dump(mode="json") for r in reviews]}
+        await set_run(deps, state.run_id, status=RunStatus.AWAITING_REVIEW, review=payload,
+                      review_requested_at=datetime.now(UTC))
+        decision = interrupt(payload)  # the API resumes with Command(resume={"choices": {...}})
+        choices = (decision or {}).get("choices", {})
+        bundle = apply_decisions(state.evidence_bundle, reviews, choices)
+        await set_run(deps, state.run_id, status=RunStatus.SYNTHESIZING, review=None)
+        resolved = sum(1 for r in reviews if choices.get(r.conflict_id, KEEP_BOTH) != KEEP_BOTH)
+        await RunLog(deps.sessionmaker, state.run_id).progress(
+            "review", f"analyst resolved {resolved} of {len(reviews)} conflict(s)", choices=choices)
+        return {"evidence_bundle": bundle}
 
     async def write(state: PipelineState) -> dict:
         await set_run(deps, state.run_id, status=RunStatus.WRITING)
@@ -278,7 +305,7 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
         return "entities" if deps.extract_entities else "synthesize"
 
     def after_synthesize(state: PipelineState) -> str:
-        return END if state.status is RunStatus.FAILED else "write"
+        return END if state.status is RunStatus.FAILED else "review"
 
     def after_ground(state: PipelineState) -> str:
         return "fact_check" if state.grounding.ok else "write"
@@ -306,6 +333,7 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
     g.add_node("research", staged("research", research))
     g.add_node("entities", staged("entities", entities))
     g.add_node("synthesize", staged("synthesize", synthesize))
+    g.add_node("review", review)
     g.add_node("write", staged("write", write))
     g.add_node("ground", staged("ground", ground))
     g.add_node("fact_check", staged("fact_check", fact_check))
@@ -316,7 +344,8 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
     g.add_edge("clarify", "plan")
     g.add_conditional_edges("research", after_research, ["entities", "synthesize", END])
     g.add_edge("entities", "synthesize")
-    g.add_conditional_edges("synthesize", after_synthesize, ["write", END])
+    g.add_conditional_edges("synthesize", after_synthesize, ["review", END])
+    g.add_edge("review", "write")
     g.add_edge("write", "ground")
     g.add_conditional_edges("ground", after_ground, ["write", "fact_check"])
     g.add_edge("fact_check", "finalize")
@@ -329,7 +358,8 @@ class RunOutcome:
     status: RunStatus
     state: dict
     question: str | None = None
-    retryable: bool = False  # a resume from the last checkpoint could succeed (time budget, provider error)
+    retryable: bool = False
+    review: dict | None = None  # pending conflict review (AWAITING_REVIEW)  # a resume from the last checkpoint could succeed (time budget, provider error)
 
 
 async def execute(
@@ -361,11 +391,13 @@ async def execute(
         return await _fail(deps, run_id, f"unexpected error: {type(exc).__name__}: {str(exc)[:500]}", retryable=True)
 
     if "__interrupt__" in state:
-        question = state["__interrupt__"][0].value["question"]
+        value = state["__interrupt__"][0].value
         meter = deps.gateway.meter
         if meter:  # the resume may run in another process; it continues from this count
             await set_run(deps, run_id, tokens_used=meter.total)
-        return RunOutcome(RunStatus.AWAITING_CLARIFICATION, state, question)
+        if value.get("type") == "review":
+            return RunOutcome(RunStatus.AWAITING_REVIEW, state, review=value)
+        return RunOutcome(RunStatus.AWAITING_CLARIFICATION, state, value["question"])
 
     status = RunStatus(state["status"])
     if status is RunStatus.FAILED:

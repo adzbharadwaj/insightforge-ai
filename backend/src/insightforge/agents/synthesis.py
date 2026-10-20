@@ -239,6 +239,13 @@ def rank_key(item: EvidenceItem) -> tuple:
 # --- rendering + compression ------------------------------------------------------------
 
 
+def adaptive_budget(default: int, sub_tasks: int, sources: int, low: int, high: int) -> int:
+    """Bundle budget scaled by brief complexity: a typical brief (5 sub-tasks, 20 sources) gets the default;
+    narrower briefs get less room (less to say, cheaper Writer), broader ones more (less forced compression)."""
+    factor = 0.5 + 0.06 * sub_tasks + 0.01 * sources
+    return max(low, min(high, round(default * factor)))
+
+
 def render_item(item: EvidenceItem, sources: dict[str, SourceMeta]) -> str:
     labels = ", ".join(dict.fromkeys(sources[s].label for s in item.source_ids if s in sources))
     date = item.published_date.isoformat() if item.published_date else "n.d."

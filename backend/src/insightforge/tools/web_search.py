@@ -18,13 +18,14 @@ from insightforge.guardrails.untrusted import wrap
 from insightforge.store.models import SourceKind
 from insightforge.store.run_log import RunLog
 from insightforge.store.scratch import ScratchStore
-from insightforge.tools.credibility import credibility_score, registered_host
+from insightforge.tools.credibility import credibility_score, matches_domain, registered_host
 from insightforge.tools.fetch import FetchedPage, PageFetcher, Skipped
 from insightforge.tools.search_providers import SearchProvider, SearchUnavailable, horizon_to_days
 
 LEAD_CHARS = 400
 CANDIDATE_MULTIPLIER = 2  # ask the provider for extra results to replace skipped ones
 AGENT = "web_search"
+DEPRIORITIZED_FACTOR = 0.5
 
 
 @dataclass
@@ -55,6 +56,8 @@ class WebResearcher:
         *,
         results_per_subtask: int = 5,
         today: date | None = None,
+        blocked_domains: list[str] | None = None,
+        deprioritized_domains: list[str] | None = None,
     ):
         self.provider = provider
         self.fetcher = fetcher
@@ -62,6 +65,10 @@ class WebResearcher:
         self.log = log
         self.n = results_per_subtask
         self.today = today
+        # Source credibility tuning (set per run by the user): blocked domains are never fetched; deprioritized
+        # ones are fetched but their credibility is halved, which pushes them down in ranking and confidence.
+        self.blocked = set(blocked_domains or [])
+        self.deprioritized = set(deprioritized_domains or [])
 
     async def research(self, sub_task_id: str, query: str, time_horizon: str | None = None) -> WebResearchOutput:
         try:
@@ -72,6 +79,12 @@ class WebResearcher:
 
         seen: set[str] = set()
         candidates = [h for h in hits if not (h.url in seen or seen.add(h.url))]
+        if self.blocked:
+            blocked = [h for h in candidates if matches_domain(h.url, self.blocked)]
+            candidates = [h for h in candidates if h not in blocked]
+            for h in blocked:
+                await self.log.emit(AGENT, "skipped_url", f"blocked by your source settings: {h.url}", url=h.url,
+                                    reason="blocked_domain", sub_task_id=sub_task_id)
         pages: list[FetchedPage] = []
         skipped: list[Skipped] = []
         # Fetch in batches of the remaining need, in rank order, until we have N bodies or run out.
@@ -98,6 +111,8 @@ class WebResearcher:
 
     async def _store(self, sub_task_id: str, page: FetchedPage) -> StoredSource:
         score = credibility_score(page.final_url, page.published_date, bool(page.author), today=self.today)
+        if self.deprioritized and matches_domain(page.final_url, self.deprioritized):
+            score = round(score * DEPRIORITIZED_FACTOR, 3)
         source_id = await self.scratch.put(
             kind=SourceKind.WEB_PAGE,
             key=page.final_url,

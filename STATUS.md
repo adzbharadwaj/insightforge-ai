@@ -8,8 +8,8 @@ Single source of truth for where the build is. Update after every component.
 
 ## Resume here
 
-**Current phase:** 8 — Evals + README **done** (1 of 5 briefs evaluated live, by the user's choice). All planned phases complete; Phase 9 bonuses optional.
-**Next step (optional):** run the other 4 briefs (`uv run insightforge-eval --brief <id>`), Phase 9 bonuses (contradiction-resolution UI, entity graph view, credibility tuning), README screenshots.
+**Current phase:** 9 — Bonuses **done** (all phases complete). 183 tests passing; bonuses browser-checked on real data.
+**Next step (optional):** run the other 4 evaluation briefs (`uv run insightforge-eval --brief <id>`), README screenshots.
 **Run the UI:** `cd frontend && npm run dev` (http://localhost:3000; API at `NEXT_PUBLIC_API_URL`, default http://localhost:8000) — start the API, worker and (optionally) scheduler first. Whole stack in Docker: `docker compose --profile app up -d --build`.
 **Resume a failed run:** `uv run insightforge --resume <run-id>` · API `POST /research/{id}/retry` · the worker auto-resumes retryable failures once.
 **Models:** back on Claude (`anthropic/claude-sonnet-5.5` / `-haiku-5.5`). Cheap verified alternative in `.env` comments: `deepseek/deepseek-v4.1-flash` / `z-ai/glm-5.3-flash`.
@@ -103,7 +103,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started. Numbers in brackets are
 - ✅ 8.3 README + context-engineering writeup
 
 ### Phase 9 — Bonuses
-- ⬜ LangSmith · contradiction-resolution UI · citation trace
+- ✅ LangSmith · contradiction-resolution UI · citation trace
 
 ## Log
 
@@ -165,3 +165,11 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started. Numbers in brackets are
   - **Incident during the smoke test:** the container worker picked up (a) the watchlist E2E's third run, whose worker I had killed earlier, re-delivered by arq 40 min later and restarted from scratch, and (b) a run fired by the scheduler from a persisted job that still had the E2E's 300 s interval (APScheduler fired the misfire before reconcile ran). Stopped both within ~2 min; cancelled them (one had used 0 tokens; the other's 300k were mostly from its earlier attempt).
   - **Fixes:** worker jobs act only on runs in the state they were queued for (`start_run` QUEUED, `resume_run` PLANNING, `retry_run` QUEUED/FAILED), so a re-delivered job never restarts a run; scheduler starts paused → reconcile → resume; new cron `fail_orphaned_runs` (every 5 min) marks runs with no run-log activity for budget + 5 min as FAILED (retry resumes from checkpoint; never auto-resumed). The test watchlist topic was paused so it can't fire daily Claude runs. Note: housekeeping tests act on the shared dev DB (they failed the genuinely orphaned Oct-18 dev runs).
 
+
+- 2026-10-20 — **Phase 9 bonuses** (no paid runs; tests + browser on real data):
+  - Contradiction resolution: opt-in `review_conflicts` (form toggle / `--review-conflicts`); `review` node after synthesize builds options from entity conflicts with ≥ 2 sides in the bundle (`agents/conflict_review.py`), interrupts (`AWAITING_REVIEW`, new enum value + `runs.review`/`review_requested_at`), `POST /research/{id}/resolve` (validated, conditional update) → worker `resolve_run` (status-guarded); chosen side kept as analyst-confirmed (MEDIUM, conflict cleared), others dropped as cuts, notes for Gaps; cron `continue_unreviewed` keeps both after 30 min. Browser-checked with a staged paused run (Allego 34,000 vs 35,000 from the eval report), then the staged run and its job were deleted.
+  - Entity graph visualizer (report tab, dependency-free force layout; first layout pushed unlinked nodes to the walls → local repulsion + stronger gravity), node panel with facts + publishers + evidence that opens the drawer. Report API now returns `entity_graph` and evidence `entity_keys`.
+  - Source credibility tuning: blocked domains never fetched (logged), deprioritized credibility × 0.5; normalized from free text; stored in `source_prefs`.
+  - Citation trace: cited sentences are clickable → drawer with the exact source paragraph. Also visible in the check: amber `[UNVERIFIED]` on a real failed claim.
+  - Adaptive bundle budget (opt-in), LangSmith documented.
+  - Test infra: autouse fixture resets the global engine pool per test (fixed order-dependent "different loop" failures).

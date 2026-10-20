@@ -64,6 +64,20 @@ def print_entities(graph: EntityGraph | None) -> None:
               + f": {values}")
 
 
+def ask_conflicts(review: dict | None) -> dict[str, str]:
+    """Interactive conflict review: pick an option number per conflict, or Enter to keep both."""
+    choices = {}
+    for c in (review or {}).get("conflicts", []):
+        what = f"{c['subject']} {c['predicate'].replace('_', ' ')}" + (f" ({c['qualifier']})" if c["qualifier"] else "")
+        print(f"\nSources disagree on {what}:")
+        for i, o in enumerate(c["options"], start=1):
+            print(f"  {i}. {o['value']}  [{', '.join(o['sources'])}]")
+        pick = input("Use which? (number, Enter = keep both) > ").strip()
+        if pick.isdigit() and 1 <= int(pick) <= len(c["options"]):
+            choices[c["conflict_id"]] = c["options"][int(pick) - 1]["option_id"]
+    return choices
+
+
 def print_report(state: dict) -> None:
     if not state.get("final_markdown"):
         return
@@ -109,9 +123,12 @@ async def main_async(brief: str | None, source_prefs: dict[str, bool], pdfs: lis
                 print(f"ingesting {len(uploads)} PDF(s)…")
             print(f"run {run_id}\nplanning…")
             outcome = await runtime.start(run_id, uploads)
-        if outcome.status is RunStatus.AWAITING_CLARIFICATION:
-            answer = input(f"\nPlanner asks: {outcome.question}\n> ").strip()
-            outcome = await runtime.resume(run_id, answer)
+        while outcome.status in (RunStatus.AWAITING_CLARIFICATION, RunStatus.AWAITING_REVIEW):
+            if outcome.status is RunStatus.AWAITING_CLARIFICATION:
+                answer = input(f"\nPlanner asks: {outcome.question}\n> ").strip()
+                outcome = await runtime.resume(run_id, answer)
+            else:
+                outcome = await runtime.resolve(run_id, ask_conflicts(outcome.review))
     async with maker() as session:
         run = await session.get(Run, run_id)
     print(f"\nstatus: {run.status.value} (attempt {run.attempts})" + (f"  error: {run.error}" if run.error else ""))
@@ -150,6 +167,8 @@ def main() -> None:
     parser.add_argument("--no-memory", action="store_true", help="Do not load prior session summaries")
     parser.add_argument("--no-web", action="store_true", help="Use only the uploaded PDFs")
     parser.add_argument("--pdf", action="append", type=Path, default=[], help="PDF to research (repeatable, max 10)")
+    parser.add_argument("--review-conflicts", action="store_true",
+                        help="Pause before writing to choose between conflicting facts")
     args = parser.parse_args()
     if args.resume:
         sys.exit(asyncio.run(main_async(None, {}, [], resume=args.resume)))
@@ -161,7 +180,8 @@ def main() -> None:
         parser.error(f"not a file: {', '.join(map(str, missing))}")
     if args.no_web and not args.pdf:
         parser.error("--no-web needs at least one --pdf")
-    prefs = {"web": not args.no_web, "docs": bool(args.pdf), "memory": not args.no_memory}
+    prefs = {"web": not args.no_web, "docs": bool(args.pdf), "memory": not args.no_memory,
+             "review_conflicts": args.review_conflicts}
     sys.exit(asyncio.run(main_async(args.brief, prefs, args.pdf)))
 
 

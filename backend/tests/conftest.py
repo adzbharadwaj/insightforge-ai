@@ -11,6 +11,15 @@ from insightforge.store.qdrant import VectorStore, make_client
 
 
 @pytest.fixture(autouse=True)
+async def _fresh_engine_pool():
+    """Code under test uses the process-wide engine; each test runs in its own event loop, so connections pooled by
+    an earlier test can't be reused ("attached to a different loop"). Drop them without closing."""
+    from insightforge.store.db import get_engine
+
+    await get_engine().dispose(close=False)
+
+
+@pytest.fixture(autouse=True)
 def _signing_secret(monkeypatch):
     """Tests never depend on the developer's .env secrets (the API refuses to start without one)."""
     monkeypatch.setattr(get_settings(), "jwt_secret", SecretStr("test-secret-" + "x" * 40))

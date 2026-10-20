@@ -69,6 +69,10 @@ class Settings(BaseSettings):
 
     # --- Context engineering ---
     evidence_bundle_token_budget: int = 6_000
+    # Bonus: scale the bundle budget with brief complexity (sub-tasks, sources) around the default above.
+    adaptive_bundle_budget: bool = False
+    adaptive_budget_min: int = 4_000
+    adaptive_budget_max: int = 9_000
     synthesis_passages_per_source: int = 3  # most query-relevant paragraphs taken from each source
     high_credibility_threshold: float = 0.6  # single source at/above this → MEDIUM confidence
     memory_summaries_loaded: int = 3

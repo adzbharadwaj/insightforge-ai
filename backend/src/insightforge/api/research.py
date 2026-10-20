@@ -5,6 +5,7 @@
     GET  /research/{run_id}            snapshot (status, sub-tasks, question, report id)
     GET  /research/status/{run_id}     SSE progress stream (token in ?token= for EventSource)
     POST /research/{run_id}/clarify    answer the Planner's question; resumes the run
+    POST /research/{run_id}/resolve    choose a side for each conflicting fact (opt-in review)
     POST /research/{run_id}/retry      resume a failed run from its last checkpoint
     POST /research/{run_id}/cancel     cancel a queued or waiting run
 
@@ -21,6 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 from sse_starlette.sse import EventSourceResponse
 
+from insightforge.agents.conflict_review import KEEP_BOTH
 from insightforge.api.auth import CurrentUser
 from insightforge.api.sse import run_event_stream
 from insightforge.api.views import TERMINAL, RunSnapshot, estimate_runtime_s, owned_run, run_snapshot
@@ -30,6 +32,7 @@ from insightforge.guardrails.untrusted import clean_text, scan_injection
 from insightforge.llm.gateway import ModelGateway
 from insightforge.store.models import Run, RunStatus
 from insightforge.store.run_log import RunLog
+from insightforge.tools.credibility import normalize_domains
 from insightforge.tools.docling_ingest import PdfRejected, safe_filename, save_upload, validate_pdfs
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,10 @@ class RunCreated(BaseModel):
 
 class ClarifyRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=500)
+
+
+class ResolveRequest(BaseModel):
+    choices: dict[str, str] = Field(default_factory=dict, description='conflict_id → option_id or "keep_both"')
 
 
 def _reject(exc: InputRejected) -> HTTPException:
@@ -86,6 +93,9 @@ async def create_run(
     web: Annotated[bool, Form()] = True,
     docs: Annotated[bool, Form()] = False,
     memory: Annotated[bool, Form()] = True,
+    blocked_domains: Annotated[str, Form(description="Never use these domains (comma or newline separated)")] = "",
+    deprioritized_domains: Annotated[str, Form(description="Use, but rank lower (credibility halved)")] = "",
+    review_conflicts: Annotated[bool, Form(description="Pause before writing to resolve conflicting facts")] = False,
     files: Annotated[list[UploadFile] | None, File()] = None,
 ) -> RunCreated:
     s = get_settings()
@@ -93,6 +103,10 @@ async def create_run(
     try:
         text = check_brief(brief, s)
         prefs = check_source_prefs({"web": web, "docs": docs, "memory": memory}, len(uploads))
+        prefs["blocked_domains"] = normalize_domains(blocked_domains)
+        prefs["deprioritized_domains"] = [d for d in normalize_domains(deprioritized_domains)
+                                          if d not in prefs["blocked_domains"]]
+        prefs["review_conflicts"] = review_conflicts
         validate_pdfs(uploads, s)
     except InputRejected as exc:
         raise _reject(exc) from exc
@@ -164,6 +178,26 @@ async def clarify(request: Request, run_id: uuid.UUID, body: ClarifyRequest, use
     if result.rowcount == 0:
         raise HTTPException(status.HTTP_409_CONFLICT, "This run is not waiting for an answer.")
     await request.app.state.queue.enqueue_job("resume_run", str(run.id), answer, _job_id=f"resume:{run.id}")
+    return await run_snapshot(maker, run)
+
+
+@router.post("/{run_id}/resolve", status_code=status.HTTP_202_ACCEPTED)
+async def resolve(request: Request, run_id: uuid.UUID, body: ResolveRequest, user_id: CurrentUser) -> RunSnapshot:
+    """Choose which version of each conflicting fact the report uses; unanswered conflicts keep both."""
+    run = await _run_or_404(request, run_id, user_id)
+    pending = {c["conflict_id"]: {o["option_id"] for o in c["options"]} for c in (run.review or {}).get("conflicts", [])}
+    for cid, choice in body.choices.items():
+        if cid not in pending or (choice != KEEP_BOTH and choice not in pending[cid]):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                {"code": "bad_choice", "message": f"Unknown conflict or option: {cid} → {choice}"})
+    maker = request.app.state.sessionmaker
+    async with maker() as session:  # conditional update: one decision wins
+        result = await session.execute(update(Run).where(Run.id == run.id, Run.status == RunStatus.AWAITING_REVIEW)
+                                       .values(status=RunStatus.SYNTHESIZING))
+        await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This run is not waiting for a review.")
+    await request.app.state.queue.enqueue_job("resolve_run", str(run.id), body.choices, _job_id=f"resolve:{run.id}")
     return await run_snapshot(maker, run)
 
 

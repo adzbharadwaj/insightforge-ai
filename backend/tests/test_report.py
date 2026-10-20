@@ -413,3 +413,12 @@ async def test_sources_outside_the_time_horizon_are_excluded_and_noted(committed
     used = {sid for s in bundle.sections for i in s.evidence for sid in i.source_ids}
     assert fresh in used and undated in used and stale not in used  # "last 12 months" (+25% slack)
     assert len(bundle.notes) == 1 and "old.example" in bundle.notes[0] and "2025-07" in bundle.notes[0]
+
+
+def test_adaptive_budget_scales_with_complexity():
+    from insightforge.agents.synthesis import adaptive_budget
+
+    assert adaptive_budget(6000, 5, 20, 4000, 9000) == 6000  # typical brief keeps the default
+    assert adaptive_budget(6000, 2, 6, 4000, 9000) == 4080  # narrow brief: less room
+    assert adaptive_budget(6000, 6, 30, 4000, 9000) == 6960  # broad brief: more room
+    assert adaptive_budget(6000, 1, 0, 4000, 9000) == 4000 and adaptive_budget(6000, 6, 200, 4000, 9000) == 9000

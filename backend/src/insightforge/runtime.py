@@ -116,7 +116,9 @@ class Runtime:
 
         def subagents(ctx: RunContext):
             researcher = WebResearcher(self.provider, self.fetcher, ctx.scratch, ctx.log,
-                                       results_per_subtask=s.search_results_per_subtask)
+                                       results_per_subtask=s.search_results_per_subtask,
+                                       blocked_domains=run.source_prefs.get("blocked_domains"),
+                                       deprioritized_domains=run.source_prefs.get("deprioritized_domains"))
             specs = [web_researcher_spec(gateway, make_web_search_tool(researcher), s.max_tool_calls_per_subagent)]
             if has_docs:
                 searcher = DocSearcher(self.vectors, ctx.log, ctx.user_id, top_k=s.doc_reader_top_k,
@@ -180,6 +182,12 @@ class Runtime:
             await RunLog(self.sessionmaker, run_id).progress("orchestrator", "retryable failure: auto-resuming")
             outcome = await self.retry(run_id)
         return outcome
+
+    async def resolve(self, run_id: uuid.UUID, choices: dict[str, str]) -> RunOutcome:
+        """Continue a run paused for conflict review with the analyst's choices (missing ones keep both)."""
+        run = await self._load(run_id)
+        pipeline, deps = self.build(run, await self._has_docs(run.id))
+        return await execute(pipeline, deps, run.id, Command(resume={"choices": choices}))
 
     async def resume(self, run_id: uuid.UUID, answer: str) -> RunOutcome:
         run = await self._load(run_id)

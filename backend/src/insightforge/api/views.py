@@ -39,6 +39,7 @@ class RunSnapshot(BaseModel):
     elapsed_s: float | None
     sub_tasks: list[SubTaskView]
     clarifying_question: str | None
+    review: dict | None = None  # conflicts awaiting the analyst (AWAITING_REVIEW)
     error: str | None
     report_id: uuid.UUID | None
     tokens_used: int
@@ -67,6 +68,7 @@ async def run_snapshot(sessionmaker: async_sessionmaker[AsyncSession], run: Run)
         sub_tasks=[SubTaskView(id=t.task_key, query=t.query, source_type=t.source_type.value, priority=t.priority,
                                status=t.status.value, summary=t.summary, error=t.error) for t in tasks],
         clarifying_question=run.clarifying_question if run.status is RunStatus.AWAITING_CLARIFICATION else None,
+        review=run.review if run.status is RunStatus.AWAITING_REVIEW else None,
         error=run.error, report_id=report_id, tokens_used=run.tokens_used, attempts=run.attempts,
         eta_seconds=estimate_runtime_s(n),
     )
@@ -90,6 +92,7 @@ class EvidenceView(BaseModel):
     published_date: str | None
     credibility: float
     conflict: bool
+    entity_keys: list[str] = []
 
 
 class ReportView(BaseModel):
@@ -103,19 +106,22 @@ class ReportView(BaseModel):
     sections: list[dict]  # theme, sub_task_id, confidence
     sources: dict[str, dict]  # citation drawer: label, url, title, date, credibility
     evidence: dict[str, EvidenceView]
+    entity_graph: dict | None = None  # entities, relationships, conflicts (entity graph visualizer)
 
 
-def report_view(report: Report, brief: str) -> ReportView:
+def report_view(report: Report, brief: str, entity_graph: dict | None = None) -> ReportView:
     bundle = report.evidence_bundle or {}
     evidence = {
         item["evidence_id"]: EvidenceView(
             evidence_id=item["evidence_id"], claim=item["claim"], passage=item.get("passage"),
             source_ids=item["source_ids"], confidence=item["confidence"], published_date=item.get("published_date"),
-            credibility=item["credibility"], conflict=item.get("conflict", False))
+            credibility=item["credibility"], conflict=item.get("conflict", False),
+            entity_keys=item.get("entity_keys", []))
         for section in bundle.get("sections", []) for item in section["evidence"]
     }
     sections = [{"theme": s["theme"], "sub_task_id": s["sub_task_id"], "confidence": s["confidence"]}
                 for s in bundle.get("sections", [])]
     return ReportView(id=report.id, title=report.title, brief=brief, created_at=report.created_at,
                       markdown=report.markdown, structure=report.structure, fact_check=report.factcheck_summary,
-                      sections=sections, sources=bundle.get("sources", {}), evidence=evidence)
+                      sections=sections, sources=bundle.get("sources", {}), evidence=evidence,
+                      entity_graph=entity_graph)

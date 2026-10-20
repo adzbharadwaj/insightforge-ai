@@ -95,6 +95,36 @@ async def resume_run(ctx: dict, run_id: str, answer: str) -> str:
     return outcome.status.value
 
 
+async def resolve_run(ctx: dict, run_id: str, choices: dict[str, str]) -> str:
+    """Continue a run paused for conflict review with the analyst's choices."""
+    rid = uuid.UUID(run_id)
+    if skipped := await _expect(rid, "resolve_run", (RunStatus.SYNTHESIZING,)):  # the resolve endpoint sets this
+        return skipped.value
+    runtime: Runtime = ctx["runtime"]
+    outcome = await runtime.run_with_auto_resume(await runtime.resolve(rid, choices), rid)
+    if outcome.status is RunStatus.COMPLETE:
+        await _after_complete(runtime, rid)
+    return outcome.status.value
+
+
+async def continue_unreviewed(ctx: dict) -> int:
+    """A conflict review nobody answered within the timeout continues with both sides kept: the research is
+    done and the review is optional, so cancelling (as for an unanswered clarifying question) would waste it."""
+    s = get_settings()
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=s.clarification_timeout_s)
+    maker = get_sessionmaker()
+    async with maker() as session:
+        result = await session.execute(update(Run).where(
+            Run.status == RunStatus.AWAITING_REVIEW, Run.review_requested_at < cutoff).values(
+            status=RunStatus.SYNTHESIZING).returning(Run.id))
+        stale = list(result.scalars())
+        await session.commit()
+    for rid in stale:
+        await RunLog(maker, rid).progress("review", "No answer within 30 minutes: continuing with both versions kept.")
+        await ctx["redis"].enqueue_job("resolve_run", str(rid), {}, _job_id=f"resolve:{rid}")
+    return len(stale)
+
+
 async def retry_run(ctx: dict, run_id: str) -> str:
     """User-requested retry: resume a failed run from its last checkpoint."""
     rid = uuid.UUID(run_id)
@@ -152,8 +182,9 @@ def redis_settings() -> RedisSettings:
 
 
 class WorkerSettings:
-    functions = (start_run, resume_run, retry_run)
+    functions = (start_run, resume_run, retry_run, resolve_run)
     cron_jobs = (cron(cancel_stale_clarifications, second=0),  # every minute
+                 cron(continue_unreviewed, second=15),
                  cron(fail_orphaned_runs, minute=set(range(0, 60, 5)), second=30))
     on_startup = startup
     on_shutdown = shutdown

@@ -7,6 +7,7 @@ score = 0.5 · domain + 0.3 · recency + 0.2 · byline, in [0, 1]
 - byline:  1 if an author is named, else 0
 """
 
+import re
 from datetime import date
 from urllib.parse import urlsplit
 
@@ -31,6 +32,29 @@ _INSTITUTIONAL_LABELS = {"gov", "edu", "ac", "go", "gob", "govt"}  # e.g. gov.sg
 def registered_host(url: str) -> str:
     host = (urlsplit(url).hostname or "").lower()
     return host.removeprefix("www.")
+
+
+_DOMAIN = re.compile(r"^(?=.{1,253}$)([a-z0-9-]{1,63}\.)+[a-z]{2,63}$")
+
+
+def normalize_domains(raw: str | list[str] | None, limit: int = 50) -> list[str]:
+    """User-entered domains ("https://www.Example.com/x", "example.com") → registered hosts; invalid ones dropped."""
+    items = re.split(r"[\s,;]+", raw) if isinstance(raw, str) else list(raw or [])
+    out = []
+    for item in items:
+        item = item.strip().lower()
+        if not item:
+            continue
+        host = registered_host(item if "://" in item else f"https://{item}")
+        if _DOMAIN.match(host) and host not in out:
+            out.append(host)
+    return out[:limit]
+
+
+def matches_domain(url: str, domains: set[str]) -> bool:
+    """True if the URL's host is one of the domains or a subdomain of one."""
+    host = registered_host(url)
+    return any(host == d or host.endswith(f".{d}") for d in domains)
 
 
 def domain_category(url: str) -> str:

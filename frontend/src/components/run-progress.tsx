@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { api, statusStreamUrl } from "@/lib/api";
-import type { LogEvent, RunSnapshot, RunStatus } from "@/lib/types";
+import type { ConflictReview, LogEvent, RunSnapshot, RunStatus } from "@/lib/types";
 import { formatDuration, Panel, RunStatusBadge, SubTaskBadge } from "./ui";
 
 const TERMINAL: RunStatus[] = ["COMPLETE", "FAILED", "CANCELLED"];
@@ -16,6 +16,7 @@ function progress(s: RunSnapshot): number {
   switch (s.status) {
     case "QUEUED": return 2;
     case "PLANNING": case "AWAITING_CLARIFICATION": return 8;
+    case "AWAITING_REVIEW": return 64;
     case "RESEARCHING": return 12 + Math.round((40 * done) / tasks);
     case "SYNTHESIZING": return 60;
     case "WRITING": return 70;
@@ -90,6 +91,10 @@ export function RunProgress({ runId }: { runId: string }) {
 
       {snapshot.status === "AWAITING_CLARIFICATION" && snapshot.clarifying_question && (
         <Clarify runId={runId} question={snapshot.clarifying_question} />
+      )}
+
+      {snapshot.status === "AWAITING_REVIEW" && snapshot.review && (
+        <Review runId={runId} conflicts={snapshot.review.conflicts} />
       )}
 
       <Panel>
@@ -170,6 +175,65 @@ function Outcome({ snapshot, onRetried }: { snapshot: RunSnapshot; onRetried: ()
   }
   if (snapshot.status === "CANCELLED") return <p className="mt-4 text-sm text-muted">{snapshot.error ?? "Cancelled."}</p>;
   return null;
+}
+
+const KEEP_BOTH = "keep_both";
+
+function Review({ runId, conflicts }: { runId: string; conflicts: ConflictReview[] }) {
+  const [choices, setChoices] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/research/${runId}/resolve`, { method: "POST", body: JSON.stringify({ choices }) });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not send your choices");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="space-y-4 rounded-lg border border-warn/40 bg-warn/10 p-5">
+      <div>
+        <p className="text-sm font-medium">Sources disagree on {conflicts.length} fact(s). Pick the version the report should use.</p>
+        <p className="text-xs text-muted">The chosen version is used and marked as analyst-confirmed; &quot;Keep both&quot; shows the disagreement in the report.</p>
+      </div>
+      {conflicts.map((c) => {
+        const what = `${c.subject} · ${c.predicate.replaceAll("_", " ")}${c.qualifier ? ` (${c.qualifier})` : ""}`;
+        const value = choices[c.conflict_id] ?? KEEP_BOTH;
+        return (
+          <fieldset key={c.conflict_id} className="rounded-md border border-border bg-panel p-4">
+            <legend className="px-1 text-sm font-semibold">{what}</legend>
+            <div className="grid gap-3 md:grid-cols-2">
+              {c.options.map((o) => (
+                <label key={o.option_id} className={`cursor-pointer rounded-md border p-3 text-sm ${
+                  value === o.option_id ? "border-accent bg-accent/5" : "border-border"}`}>
+                  <input type="radio" name={c.conflict_id} value={o.option_id} checked={value === o.option_id}
+                         onChange={() => setChoices({ ...choices, [c.conflict_id]: o.option_id })} className="mr-2" />
+                  <span className="font-semibold">{o.value}</span>
+                  <span className="block text-xs text-muted">{o.sources.join(", ")}</span>
+                  {o.claims.slice(0, 2).map((claim, i) => <span key={i} className="mt-1 block text-xs">“{claim}”</span>)}
+                </label>
+              ))}
+            </div>
+            <label className="mt-2 block text-sm">
+              <input type="radio" name={c.conflict_id} value={KEEP_BOTH} checked={value === KEEP_BOTH}
+                     onChange={() => setChoices({ ...choices, [c.conflict_id]: KEEP_BOTH })} className="mr-2" />
+              Keep both
+            </label>
+          </fieldset>
+        );
+      })}
+      <button disabled={busy} className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+        {busy ? "Continuing…" : "Continue to writing"}
+      </button>
+      {error && <p className="text-sm text-bad">{error}</p>}
+    </form>
+  );
 }
 
 function Clarify({ runId, question }: { runId: string; question: string }) {

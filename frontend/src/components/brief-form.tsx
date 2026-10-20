@@ -27,6 +27,9 @@ export function BriefForm() {
   const [files, setFiles] = useState<File[]>([]);
   const [web, setWeb] = useState(true);
   const [memory, setMemory] = useState(true);
+  const [blocked, setBlocked] = useState("");
+  const [deprioritized, setDeprioritized] = useState("");
+  const [reviewConflicts, setReviewConflicts] = useState(false);
   const [eta, setEta] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -72,6 +75,9 @@ export function BriefForm() {
     form.set("web", String(web));
     form.set("docs", String(docs));
     form.set("memory", String(memory));
+    form.set("blocked_domains", blocked);
+    form.set("deprioritized_domains", deprioritized);
+    form.set("review_conflicts", String(reviewConflicts));
     files.forEach((f) => form.append("files", f));
     try {
       const res = await api<{ run_id: string }>("/research/run", { method: "POST", body: form });
@@ -132,6 +138,34 @@ export function BriefForm() {
         <Toggle label="Uploaded docs" checked={docs} onChange={() => {}} disabled={!docs} />
         <Toggle label="Prior reports" checked={memory} onChange={setMemory} />
         <span className="ml-auto text-sm text-muted">Estimated runtime: ~{formatDuration(eta)}</span>
+      </Panel>
+
+      <Panel>
+        <details>
+          <summary className="cursor-pointer text-sm font-medium">Source settings</summary>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <label className="text-sm">
+              <span className="mb-1 block text-muted">Never use these domains</span>
+              <textarea value={blocked} onChange={(e) => setBlocked(e.target.value)} rows={3}
+                        placeholder="prnewswire.com, businesswire.com"
+                        className="w-full rounded-md border border-border bg-bg p-2 text-sm" />
+            </label>
+            <label className="text-sm">
+              <span className="mb-1 block text-muted">Use, but rank lower (credibility halved)</span>
+              <textarea value={deprioritized} onChange={(e) => setDeprioritized(e.target.value)} rows={3}
+                        placeholder="medium.com"
+                        className="w-full rounded-md border border-border bg-bg p-2 text-sm" />
+            </label>
+            <div className="md:col-span-2">
+              <Toggle label="Let me resolve conflicting facts before the report is written"
+                      checked={reviewConflicts} onChange={setReviewConflicts} />
+              <p className="ml-6 mt-1 text-xs text-muted">
+                When sources disagree (e.g. two funding amounts), the run pauses so you can pick a version. Unanswered
+                after 30 minutes, both versions are kept.
+              </p>
+            </div>
+          </div>
+        </details>
       </Panel>
 
       {error && <p className="rounded-md border border-bad/30 bg-bad/10 p-3 text-sm text-bad">{error}</p>}

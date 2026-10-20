@@ -42,6 +42,7 @@ class RunStatus(enum.StrEnum):
     QUEUED = "QUEUED"
     PLANNING = "PLANNING"
     AWAITING_CLARIFICATION = "AWAITING_CLARIFICATION"
+    AWAITING_REVIEW = "AWAITING_REVIEW"  # analyst resolves conflicting facts before writing (opt-in)
     RESEARCHING = "RESEARCHING"
     SYNTHESIZING = "SYNTHESIZING"
     WRITING = "WRITING"
@@ -110,6 +111,8 @@ class Run(Base):
     status: Mapped[RunStatus] = mapped_column(_enum(RunStatus, "run_status"), default=RunStatus.QUEUED)
     clarifying_question: Mapped[str | None] = mapped_column(Text)
     clarification_asked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 30-min timeout
+    review: Mapped[dict | None] = mapped_column(JSONB)  # pending conflict review shown to the analyst
+    review_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     clarification_answer: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     tokens_used: Mapped[int] = mapped_column(Integer, default=0)

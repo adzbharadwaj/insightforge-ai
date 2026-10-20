@@ -1,7 +1,7 @@
 // Mirrors the backend response models (insightforge/api/views.py, research.py, watchlist.py).
 
 export type RunStatus =
-  | "QUEUED" | "PLANNING" | "AWAITING_CLARIFICATION" | "RESEARCHING" | "SYNTHESIZING"
+  | "QUEUED" | "PLANNING" | "AWAITING_CLARIFICATION" | "AWAITING_REVIEW" | "RESEARCHING" | "SYNTHESIZING"
   | "WRITING" | "GROUNDING" | "FACT_CHECKING" | "COMPLETE" | "FAILED" | "CANCELLED";
 
 export type SubTaskStatus = "Queued" | "Running" | "Done" | "Failed";
@@ -27,11 +27,52 @@ export interface RunSnapshot {
   elapsed_s: number | null;
   sub_tasks: SubTaskView[];
   clarifying_question: string | null;
+  review: { conflicts: ConflictReview[] } | null;
   error: string | null;
   report_id: string | null;
   tokens_used: number;
   attempts: number;
   eta_seconds: number;
+}
+
+export interface ConflictOption {
+  option_id: string;
+  value: string;
+  evidence_ids: string[];
+  claims: string[];
+  sources: string[];
+}
+
+export interface ConflictReview {
+  conflict_id: string;
+  subject: string;
+  predicate: string;
+  qualifier: string | null;
+  options: ConflictOption[];
+}
+
+export interface EntityNode {
+  key: string;
+  name: string;
+  type: string;
+  source_ids: string[];
+}
+
+export interface Relationship {
+  subject: string;
+  predicate: string;
+  object: string;
+  qualifier: string | null;
+  source_id: string;
+  source_url: string | null;
+  date: string | null;
+  conflict: boolean;
+}
+
+export interface EntityGraph {
+  entities: EntityNode[];
+  relationships: Relationship[];
+  conflicts: { subject: string; predicate: string; qualifier: string | null; values: { object: string; source_ids: string[] }[] }[];
 }
 
 export interface LogEvent {
@@ -87,6 +128,7 @@ export interface EvidenceView {
   published_date: string | null;
   credibility: number;
   conflict: boolean;
+  entity_keys: string[];
 }
 
 export interface ClaimCheck {
@@ -119,6 +161,7 @@ export interface ReportView {
   sections: { theme: string; sub_task_id: string; confidence: Confidence }[];
   sources: Record<string, SourceMeta>;
   evidence: Record<string, EvidenceView>;
+  entity_graph: EntityGraph | null;
 }
 
 export interface ReportSummary {

@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, download } from "@/lib/api";
 import type { ClaimCheck, ReportView, WrittenSentence } from "@/lib/types";
+import { EntityGraphView } from "./entity-graph";
 import { Badge, ConfidenceBadge, formatDate, Panel } from "./ui";
 
 interface Citation {
@@ -31,6 +32,11 @@ function slug(s: string) {
 
 export function ReportViewer({ report, shareToken }: { report: ReportView; shareToken?: string }) {
   const [open, setOpen] = useState<Citation | null>(null);
+  const [tab, setTab] = useState<"report" | "entities">("report");
+  const openEvidence = (evidenceId: string) => {
+    const sourceId = report.evidence[evidenceId]?.source_ids[0];
+    if (sourceId) setOpen({ sourceId, evidenceId });
+  };
   const checks = useMemo(() => {
     const byClaim = new Map<string, ClaimCheck>();
     report.fact_check?.checks.forEach((c) => byClaim.set(c.claim_id, c));
@@ -50,10 +56,17 @@ export function ReportViewer({ report, shareToken }: { report: ReportView; share
   function Sentence({ s, loc }: { s: WrittenSentence; loc: string }) {
     const check = checks.get(loc);
     const unverified = check && !check.verified;
+    const cites = citationsFor(s, report);
+    // Citation trace: clicking a cited sentence opens the source paragraph it was drawn from.
+    const traceable = cites.length > 0;
     return (
       <>
-        <span className={unverified ? "rounded bg-amber px-0.5" : undefined}>{s.text}</span>
-        {citationsFor(s, report).map((c) => {
+        <span
+          className={`${unverified ? "rounded bg-amber px-0.5" : ""} ${traceable ? "cursor-pointer decoration-dotted underline-offset-4 hover:underline" : ""}`}
+          onClick={traceable ? () => setOpen(cites[0]) : undefined}
+          title={traceable ? "Show the source paragraph" : undefined}
+        >{s.text}</span>
+        {cites.map((c) => {
           const src = report.sources[c.sourceId];
           return (
             <button key={c.sourceId} onClick={() => setOpen(c)}
@@ -90,9 +103,21 @@ export function ReportViewer({ report, shareToken }: { report: ReportView; share
           <h1 className="text-2xl font-semibold tracking-tight">{report.title}</h1>
           <p className="text-sm text-muted">Brief: {report.brief} · {formatDate(report.created_at)}</p>
           <Exports report={report} shareToken={shareToken} />
+          {report.entity_graph && (
+            <div className="flex gap-1 pt-2 text-sm" role="tablist">
+              {(["report", "entities"] as const).map((t) => (
+                <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)}
+                        className={`rounded-md px-3 py-1.5 ${tab === t ? "bg-accent text-white" : "text-muted hover:text-text"}`}>
+                  {t === "report" ? "Report" : "Entity graph"}
+                </button>
+              ))}
+            </div>
+          )}
         </header>
 
-        {structure ? (
+        {tab === "entities" ? (
+          <Panel><EntityGraphView report={report} onOpenEvidence={openEvidence} /></Panel>
+        ) : structure ? (
           <>
             <Panel>
               <h2 id="executive-summary" className="mb-2 text-lg font-semibold">Executive Summary</h2>

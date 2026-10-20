@@ -96,7 +96,8 @@ async def test_auth_is_required_and_scoped(api):
 async def test_valid_brief_is_queued_with_uploads(api):
     client, app, emails = api
     headers, user_id = await login(client, emails)
-    r = await submit(client, headers, docs=True, files=[("files", ("deck.pdf", PDF_BYTES, "application/pdf"))])
+    r = await submit(client, headers, docs=True, files=[("files", ("deck.pdf", PDF_BYTES, "application/pdf"))],
+                     blocked_domains="https://www.PRNewswire.com/x, nonsense", deprioritized_domains="medium.com prnewswire.com")
     assert r.status_code == 202, r.text
     body = r.json()
     run_id = uuid.UUID(body["run_id"])
@@ -106,7 +107,10 @@ async def test_valid_brief_is_queued_with_uploads(api):
     assert args[1][0]["filename"] == "deck.pdf" and args[1][0]["path"].endswith(".pdf")
     async with app.state.sessionmaker() as s:
         run = await s.get(Run, run_id)
-    assert run.user_id == user_id and run.source_prefs == {"web": True, "docs": True, "memory": True}
+    assert run.user_id == user_id and run.source_prefs == {
+        "web": True, "docs": True, "memory": True,
+        "blocked_domains": ["prnewswire.com"], "deprioritized_domains": ["medium.com"],  # blocked wins
+        "review_conflicts": False}
 
 
 @pytest.mark.parametrize(("brief", "form", "files", "code"), [
@@ -390,3 +394,25 @@ async def test_retry_endpoint_resumes_failed_runs_only(api):
     exhausted = await make_run(app, user_id, status=RunStatus.FAILED, attempts=3)
     r = await client.post(f"/research/{exhausted}/retry", headers=headers)
     assert r.status_code == 409 and "3 attempts" in r.json()["detail"]
+
+
+async def test_resolve_endpoint_validates_choices_and_resumes_once(api):
+    client, app, emails = api
+    headers, user_id = await login(client, emails)
+    review = {"type": "review", "conflicts": [{"conflict_id": "k1", "subject": "Allego", "predicate": "employee_count",
+                                                "qualifier": None, "options": [
+                                                    {"option_id": "k1-v1", "value": "34,000", "evidence_ids": ["ev-1"],
+                                                     "claims": ["a"], "sources": ["rac.co.uk"]},
+                                                    {"option_id": "k1-v2", "value": "35,000", "evidence_ids": ["ev-2"],
+                                                     "claims": ["b"], "sources": ["evmagazine.com"]}]}]}
+    run_id = await make_run(app, user_id, status=RunStatus.AWAITING_REVIEW, review=review)
+    snap = (await client.get(f"/research/{run_id}", headers=headers)).json()
+    assert snap["review"]["conflicts"][0]["options"][0]["value"] == "34,000"
+
+    bad = await client.post(f"/research/{run_id}/resolve", json={"choices": {"k1": "k9-v9"}}, headers=headers)
+    assert bad.status_code == 422 and bad.json()["detail"]["code"] == "bad_choice"
+    ok = await client.post(f"/research/{run_id}/resolve", json={"choices": {"k1": "k1-v2"}}, headers=headers)
+    assert ok.status_code == 202 and ok.json()["status"] == "SYNTHESIZING"
+    assert app.state.queue.jobs[-1] == ("resolve_run", (str(run_id), {"k1": "k1-v2"}), f"resolve:{run_id}")
+    again = await client.post(f"/research/{run_id}/resolve", json={"choices": {}}, headers=headers)
+    assert again.status_code == 409
