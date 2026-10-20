@@ -10,6 +10,8 @@ numbers (raw corpus tokens vs. what the Planner actually received).
 
 import argparse
 import asyncio
+import faulthandler
+import signal
 import sys
 import uuid
 from pathlib import Path
@@ -21,7 +23,7 @@ from sqlalchemy import select
 
 from insightforge.agents.doc_reader import doc_reader_spec
 from insightforge.agents.web_search import web_researcher_spec
-from insightforge.config import Settings, get_settings
+from insightforge.config import REPO_ROOT, Settings, get_settings
 from insightforge.graph.pipeline import PipelineDeps, RunContext, build_pipeline, execute
 from insightforge.graph.state import EntityGraph, ResearchResult
 from insightforge.llm.gateway import ModelGateway
@@ -40,6 +42,7 @@ from insightforge.tools.search_providers import make_search_provider
 from insightforge.tools.web_search import WebResearcher, make_web_search_tool
 
 DEV_EMAIL = "dev@insightforge.local"
+REPORTS_DIR = REPO_ROOT / "data" / "reports"
 
 
 def checkpointer_url(settings: Settings) -> str:
@@ -84,6 +87,21 @@ def print_entities(graph: EntityGraph | None) -> None:
         values = " vs ".join(f"{v.object} {v.source_ids}" for v in c.values)
         print(f"  CONFLICT {c.subject} {c.predicate.value}" + (f" ({c.qualifier})" if c.qualifier else "")
               + f": {values}")
+
+
+def print_report(state: dict) -> None:
+    if not state.get("final_markdown"):
+        return
+    path = REPORTS_DIR / f"{state['run_id']}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(state["final_markdown"])
+    draft, fc = state["draft"], state["fact_check"]
+    print(f"\nreport: {draft.report.title}\n  {len(draft.claims)} claim(s), {state['writer_attempts']} writer attempt(s)"
+          f"\n  saved to {path}")
+    print(f"fact-check: {fc.passed}/{fc.total_checked} passed (pass rate {fc.pass_rate:.0%})")
+    for c in fc.checks:
+        mark = "ok  " if c.verified else "FAIL"
+        print(f"  {mark} {c.similarity or 0:.2f} [{c.checked_against}] {c.text[:110]}")
 
 
 async def ingest_pdfs(maker, vectors, user_id, run_id, paths: list[Path]) -> int:
@@ -145,7 +163,7 @@ async def main_async(brief: str, source_prefs: dict[str, bool], pdfs: list[Path]
             return await load_related_entities(vectors, uid, query, n)
 
         deps = PipelineDeps(settings, maker, gateway, subagents, memory_loader,
-                            vectors=vectors, entity_loader=entity_loader)
+                            vectors=vectors, entity_loader=entity_loader, fetcher=fetcher)
         pipeline = build_pipeline(deps, saver)
 
         print(f"run {run_id}\nplanning…")
@@ -170,14 +188,22 @@ async def main_async(brief: str, source_prefs: dict[str, bool], pdfs: list[Path]
 
     corpus = await ScratchStore(maker, run_id).total_tokens()
     handed_up = sum(count_tokens(r.model_dump_json()) for r in results)
+    print_report(outcome.state)
     print(f"\ntokens used (all models): {gateway.meter.total:,}")
+    for stage, used in outcome.state.get("stage_tokens", {}).items():
+        print(f"  {stage:<11} {used:>8,}")
     print(f"context: raw corpus in scratch store ≈ {corpus:,} tokens; "
           f"Planner received ≈ {handed_up:,} tokens of references")
+    if bundle := outcome.state.get("evidence_bundle"):
+        print(f"         Writer received an evidence bundle of {bundle.token_count:,}/{bundle.token_budget:,} tokens "
+              f"({len(bundle.cuts)} compression cut(s))")
     await get_engine().dispose()
     return 0 if run.status is not RunStatus.FAILED else 1
 
 
 def main() -> None:
+    sys.stdout.reconfigure(line_buffering=True)  # progress shows up even when output is piped to a file
+    faulthandler.register(signal.SIGUSR1, all_threads=True)  # `kill -USR1 <pid>` dumps every stack
     parser = argparse.ArgumentParser(description="Run one research brief through the InsightForge pipeline.")
     parser.add_argument("brief", help="Research brief (max 500 characters)")
     parser.add_argument("--no-memory", action="store_true", help="Do not load prior session summaries")

@@ -1,10 +1,12 @@
 """LangGraph orchestrator (component 05): the control plane.
 
     load_context → plan ─┬─(question)→ clarify → plan
-                         └─(tasks)───→ research → entities → END   (Phase 4 adds synthesis → writing → fact-check)
+                         └─(tasks)───→ research → entities → synthesize → write ⇄ ground → fact_check → finalize
 
 research = wave 1 (one isolated researcher per sub-task); entities = wave 2 (one
-Entity Extractor that receives source ids only).
+Entity Extractor that receives source ids only). `ground` sends the draft back to
+`write` with explicit constraints until it passes or retries run out; then unsupported
+claims are dropped. Only `finalize` stores the report: nothing unvalidated is shown.
 
 Every node records the run's status in Postgres. Budgets are enforced around the
 graph (time) and inside the model gateway (tokens); a breach ends the run FAILED.
@@ -27,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from insightforge.agents.delegation import ResearchRecorder
 from insightforge.agents.entity_extractor import run_entity_wave
+from insightforge.agents.fact_checker import FactChecker
 from insightforge.agents.planner import (
     PlanningError,
     allowed_source_types,
@@ -35,15 +38,22 @@ from insightforge.agents.planner import (
     plan,
     run_research,
 )
+from insightforge.agents.synthesis import Synthesizer
+from insightforge.agents.writer import render_report, write_report
 from insightforge.config import Settings
-from insightforge.graph.state import PipelineState
+from insightforge.graph.state import FactCheckSummary, PipelineState
+from insightforge.guardrails.grounding import check_grounding, drop_unsupported, retry_constraints
+from insightforge.guardrails.output import redact_pii
 from insightforge.llm.gateway import ModelGateway, TokenBudgetExceeded
 from insightforge.store.entity_store import save_entity_graph, upsert_entity_embeddings
+from insightforge.store.memory import save_summary
 from insightforge.store.models import Run, RunStatus, SubTaskStatus
 from insightforge.store.qdrant import VectorStore
+from insightforge.store.reports import save_report, session_summary
 from insightforge.store.run_log import RunLog
 from insightforge.store.scratch import ScratchStore
 from insightforge.store.sources import SourceResolver
+from insightforge.tools.fetch import PageFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +81,7 @@ class PipelineDeps:
     vectors: VectorStore | None = None  # needed for PDF chunk ids and entity embeddings
     entity_loader: Callable[[uuid.UUID, str, int], Awaitable[list[str]]] | None = None  # (user_id, brief, n)
     extract_entities: bool = True
+    fetcher: PageFetcher | None = None  # live re-fetch for the Fact-Checker; None → stored copies only
 
     def context(self, run_id: uuid.UUID, user_id: uuid.UUID) -> RunContext:
         scratch = ScratchStore(self.sessionmaker, run_id)
@@ -142,8 +153,14 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
 
     async def entities(state: PipelineState) -> dict:
         ctx = deps.context(state.run_id, state.user_id)
-        source_ids = [ref.source_id for r in state.research_results if r.status is SubTaskStatus.DONE
-                      for ref in r.refs]
+        refs = {ref.source_id: ref for r in state.research_results if r.status is SubTaskStatus.DONE for ref in r.refs}
+        # Cost grows with sources (~3k tokens each); keep the most credible ones so the stage stays bounded.
+        ranked = sorted(refs.values(), key=lambda ref: ref.credibility or 0.0, reverse=True)
+        source_ids = [ref.source_id for ref in ranked[: s.entity_max_sources]]
+        if len(ranked) > len(source_ids):
+            await ctx.log.emit("entity_extractor", "cut",
+                               f"extracting from the {len(source_ids)} most credible of {len(ranked)} sources",
+                               skipped=[ref.source_id for ref in ranked[s.entity_max_sources:]])
         try:
             graph = await run_entity_wave(
                 deps.gateway, ctx.resolver, ctx.log, source_ids,
@@ -161,25 +178,136 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
             await upsert_entity_embeddings(deps.vectors, state.user_id, state.run_id, graph)
         return {"entity_graph": graph}
 
+    async def synthesize(state: PipelineState) -> dict:
+        await set_run(deps, state.run_id, status=RunStatus.SYNTHESIZING)
+        ctx = deps.context(state.run_id, state.user_id)
+        result = await Synthesizer(
+            deps.gateway, ctx.resolver, ctx.log, token_budget=s.evidence_bundle_token_budget,
+            passages_per_source=s.synthesis_passages_per_source, high_credibility=s.high_credibility_threshold,
+        ).run(state.brief, state.task_graph.sub_tasks, state.research_results, state.entity_graph)
+        if not result.bundle.sections:
+            return {"status": RunStatus.FAILED, "error": "synthesis found no usable evidence"}
+        return {"evidence_bundle": result.bundle, "status": RunStatus.SYNTHESIZING}
+
+    async def write(state: PipelineState) -> dict:
+        await set_run(deps, state.run_id, status=RunStatus.WRITING)
+        constraints = None
+        if state.grounding and not state.grounding.ok and state.draft:
+            constraints = retry_constraints(state.grounding, state.draft)
+            await RunLog(deps.sessionmaker, state.run_id).emit(
+                "writer", "retry", f"rewriting: {len(constraints)} grounding issue(s)", constraints=constraints)
+        failed = [r for r in state.research_results if r.status is not SubTaskStatus.DONE]
+        out = await write_report(deps.gateway, brief=state.brief, bundle=state.evidence_bundle,
+                                 failed=failed, constraints=constraints)
+        return {"draft": render_report(out, state.evidence_bundle), "writer_attempts": state.writer_attempts + 1,
+                "grounding": None}
+
+    async def ground(state: PipelineState) -> dict:
+        await set_run(deps, state.run_id, status=RunStatus.GROUNDING)
+        meter = deps.gateway.meter
+        before = meter.total if meter else 0
+        result = await check_grounding(deps.gateway, state.draft, state.evidence_bundle)
+        log = RunLog(deps.sessionmaker, state.run_id)
+        await log.progress("grounding", f"attempt {state.writer_attempts}: "
+                                        f"{len(result.unsupported_claim_ids)} unsupported claim(s)",
+                           reasons=result.reasons)
+        if result.ok:
+            return {"grounding": result}
+        if state.writer_attempts <= s.max_writer_retries:
+            # Another attempt costs about one write plus one grounding check. If the budget can't cover it,
+            # degrade (drop the unsupported claims) rather than fail a nearly finished run on the budget.
+            retry_cost = (state.stage_tokens.get("write", 0) / max(1, state.writer_attempts)
+                          + ((meter.total if meter else 0) - before))
+            if meter is None or meter.remaining > retry_cost * 1.2:
+                return {"grounding": result}
+            await log.emit("grounding", "retry", f"skipping rewrite: ~{retry_cost:,.0f} tokens needed, "
+                                                 f"{meter.remaining:,} left in the run budget")
+        # Retries exhausted (or unaffordable): fail safe by removing what the evidence does not support.
+        cleaned = drop_unsupported(state.draft, result, state.evidence_bundle)
+        await log.emit("grounding", "cut", f"removed {len(result.unsupported_claim_ids)} unsupported claim(s)",
+                       claim_ids=result.unsupported_claim_ids)
+        return {"draft": render_report(cleaned, state.evidence_bundle),
+                "grounding": result.model_copy(update={"ok": True})}
+
+    async def fact_check(state: PipelineState) -> dict:
+        await set_run(deps, state.run_id, status=RunStatus.FACT_CHECKING)
+        if deps.vectors is None:
+            return {"fact_check": FactCheckSummary(total_checked=0, passed=0, failed=0, pass_rate=1.0,
+                                                   unverified_claims=[])}
+        ctx = deps.context(state.run_id, state.user_id)
+        summary = await FactChecker(
+            deps.vectors, ctx.resolver, ctx.log, fetcher=deps.fetcher, sample_ratio=s.factcheck_sample_ratio,
+            min_claims=s.factcheck_min_claims, threshold=s.factcheck_similarity_threshold,
+        ).run(state.draft, state.evidence_bundle)
+        return {"fact_check": summary}
+
+    async def finalize(state: PipelineState) -> dict:
+        unverified = frozenset(c.claim_id for c in state.fact_check.checks if not c.verified)
+        draft = render_report(state.draft.report, state.evidence_bundle, unverified)
+        markdown, redacted = redact_pii(draft.markdown)
+        log = RunLog(deps.sessionmaker, state.run_id)
+        if redacted:
+            await log.emit("output_guardrail", "redaction", f"redacted personal data: {redacted}", **redacted)
+        report_id = await save_report(deps.sessionmaker, run_id=state.run_id, user_id=state.user_id, draft=draft,
+                                      markdown=markdown, bundle=state.evidence_bundle, fact_check=state.fact_check)
+        if deps.vectors is not None:
+            await save_summary(deps.vectors, state.user_id, state.run_id, session_summary(state.brief, draft))
+        await set_run(deps, state.run_id, status=RunStatus.COMPLETE, finished_at=datetime.now(UTC))
+        await log.progress("orchestrator", "report complete", report_id=str(report_id),
+                           stage_tokens=state.stage_tokens)
+        return {"draft": draft, "final_markdown": markdown, "report_id": report_id, "status": RunStatus.COMPLETE}
+
     def after_plan(state: PipelineState) -> str:
         return "clarify" if state.task_graph and state.task_graph.clarifying_question else "research"
 
     def after_research(state: PipelineState) -> str:
-        ok = state.status is not RunStatus.FAILED
-        return "entities" if ok and deps.extract_entities else END
+        if state.status is RunStatus.FAILED:
+            return END
+        return "entities" if deps.extract_entities else "synthesize"
+
+    def after_synthesize(state: PipelineState) -> str:
+        return END if state.status is RunStatus.FAILED else "write"
+
+    def after_ground(state: PipelineState) -> str:
+        return "fact_check" if state.grounding.ok else "write"
+
+    def staged(name: str, fn):
+        """Record the tokens each stage uses (summed across write/ground retries)."""
+        async def node(state: PipelineState) -> dict:
+            meter = deps.gateway.meter
+            before = meter.total if meter else 0
+            update = dict(await fn(state) or {})
+            used = (meter.total if meter else 0) - before
+            update["stage_tokens"] = {name: state.stage_tokens.get(name, 0) + used}
+            # Logged as each stage ends, so a run that fails later still shows where its tokens went.
+            await RunLog(deps.sessionmaker, state.run_id).emit(
+                "orchestrator", "tokens", f"{name}: {used:,} tokens", stage=name, tokens=used,
+                run_total=meter.total if meter else 0)
+            return update
+        return node
 
     g = StateGraph(PipelineState)
     g.add_node("load_context", load_context)
-    g.add_node("plan", plan_node)
+    g.add_node("plan", staged("plan", plan_node))
     g.add_node("clarify", clarify)
-    g.add_node("research", research)
-    g.add_node("entities", entities)
+    g.add_node("research", staged("research", research))
+    g.add_node("entities", staged("entities", entities))
+    g.add_node("synthesize", staged("synthesize", synthesize))
+    g.add_node("write", staged("write", write))
+    g.add_node("ground", staged("ground", ground))
+    g.add_node("fact_check", staged("fact_check", fact_check))
+    g.add_node("finalize", finalize)
     g.add_edge(START, "load_context")
     g.add_edge("load_context", "plan")
     g.add_conditional_edges("plan", after_plan, ["clarify", "research"])
     g.add_edge("clarify", "plan")
-    g.add_conditional_edges("research", after_research, ["entities", END])
-    g.add_edge("entities", END)
+    g.add_conditional_edges("research", after_research, ["entities", "synthesize", END])
+    g.add_edge("entities", "synthesize")
+    g.add_conditional_edges("synthesize", after_synthesize, ["write", END])
+    g.add_edge("write", "ground")
+    g.add_conditional_edges("ground", after_ground, ["write", "fact_check"])
+    g.add_edge("fact_check", "finalize")
+    g.add_edge("finalize", END)
     return g.compile(checkpointer=checkpointer, name="insightforge_pipeline")
 
 

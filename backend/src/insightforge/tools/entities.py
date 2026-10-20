@@ -79,6 +79,26 @@ def parse_money(text: str) -> Money | None:
     return Money(_CURRENCIES[cur.lower()] if cur else None, amount)
 
 
+_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def numbers_in(text: str) -> set[float]:
+    """Every number in the text, plus scaled money amounts ("$7.6M" → 7.6 and 7_600_000)."""
+    out: set[float] = set()
+    for m in _NUM.finditer(text):
+        try:
+            out.add(float(m.group().replace(",", "")))
+        except ValueError:
+            continue
+    for m in _MONEY.finditer(text):
+        if m["num"] and m["scale"]:
+            try:
+                out.add(float(m["num"].replace(",", "")) * _SCALES[m["scale"].lower()])
+            except ValueError:
+                continue
+    return out
+
+
 def entity_key(name: str, type_: EntityType) -> str:
     base = name.lower()
     if type_ is EntityType.COMPANY:

@@ -35,9 +35,9 @@ def test_task_graph_needs_question_xor_tasks():
         TaskGraph(sub_tasks=[_task(1)], clarifying_question="Which region?")
 
 
-def test_task_graph_rejects_more_than_six_and_duplicates():
-    with pytest.raises(ValidationError):
-        TaskGraph(sub_tasks=[_task(i, priority=min(i, 6)) for i in range(1, 8)])
+def test_task_graph_never_exceeds_six_and_rejects_duplicates():
+    graph = TaskGraph(sub_tasks=[_task(i, priority=min(i, 6)) for i in range(1, 8)])
+    assert len(graph.sub_tasks) == 6  # the extra one is cut by priority, not a reason to fail the run
     with pytest.raises(ValidationError):
         TaskGraph(sub_tasks=[_task(1), _task(1)])
 
@@ -48,8 +48,8 @@ def test_capped_keeps_highest_priority():
 
 
 def test_source_ref_has_no_room_for_raw_text():
-    with pytest.raises(ValidationError):
-        SourceRef(source_id="src-1", kind=SourceKind.WEB_PAGE, summary="x" * 301)
+    ref = SourceRef(source_id="src-1", kind=SourceKind.WEB_PAGE, summary="x" * 5_000)
+    assert len(ref.summary) == 300  # a researcher pasting a whole article only gets one line through
     assert "body_text" not in SourceRef.model_fields
 
 
@@ -76,3 +76,14 @@ def test_parallel_research_results_are_merged_by_reducer():
     g.add_edge("b", END)
     out = g.compile().invoke({"run_id": uuid.uuid4(), "user_id": uuid.uuid4(), "brief": "b"})
     assert sorted(r.sub_task_id for r in out["research_results"]) == ["st-1", "st-2"]
+
+
+def test_model_written_fields_clip_instead_of_failing_the_run():
+    """Native JSON schema treats maxLength as a hint; a 350-char scope once failed a live run."""
+    raw = {"sub_tasks": [{"id": f"st-{i}", "query": "q" * 400, "scope": "s" * 350, "source_type": "web",
+                          "time_horizon": "last 12 months", "priority": p}
+                         for i, p in enumerate([6, 5, 4, 3, 2, 1, 1], start=1)]}
+    g = TaskGraph.model_validate(raw)
+    assert len(g.sub_tasks) == 6 and "st-1" not in {t.id for t in g.sub_tasks}  # lowest priority (6) dropped
+    assert {len(t.query) for t in g.sub_tasks} == {300} and {len(t.scope) for t in g.sub_tasks} == {300}
+    assert TaskGraph.model_json_schema()["$defs"]["SubTaskSpec"]["properties"]["scope"]["maxLength"] == 300

@@ -54,6 +54,8 @@ class VectorStore:
             )
         # Index creation is idempotent, so collections created by older code get new indexes too.
         indexes = {"user_id": models.PayloadSchemaType.KEYWORD, "run_id": models.PayloadSchemaType.KEYWORD}
+        if name.startswith("factcheck_"):
+            indexes["source_id"] = models.PayloadSchemaType.KEYWORD
         if name == REPORT_SUMMARIES:  # memory loads "most recent first", which needs an ordered index
             indexes["created_at"] = models.PayloadSchemaType.FLOAT
         for field, schema in indexes.items():
@@ -90,11 +92,14 @@ class VectorStore:
         user_id: uuid.UUID | str,
         limit: int = 8,
         match: dict[str, str] | None = None,
+        match_any: dict[str, list[str]] | None = None,
         score_threshold: float | None = None,
     ) -> list[Hit]:
         must = [models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
         for key, value in (match or {}).items():
             must.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
+        for key, values in (match_any or {}).items():
+            must.append(models.FieldCondition(key=key, match=models.MatchAny(any=values)))
         result = await self.client.query_points(
             collection,
             query=vector,

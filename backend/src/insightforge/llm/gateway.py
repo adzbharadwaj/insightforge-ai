@@ -45,21 +45,29 @@ class RoleSpec:
     tier: Tier
     max_tokens: int
     temperature: float = 0.0
+    # OpenRouter reasoning effort. Hidden reasoning counts against max_tokens and the run budget, and
+    # Claude 5.5 models reason adaptively by default. "low" bounds it to a small share of max_tokens.
+    # It can't simply be switched off: Sonnet 5.5 rejects reasoning.enabled=false, and any role may fall
+    # back to it. None = provider default (judgment-heavy roles).
+    reasoning_effort: str | None = "low"
+    # Long structured outputs take a while to generate; a timeout shorter than that turns a slow call into
+    # retries (and then a fallback), multiplying latency. Size it to the role's expected output.
+    timeout_s: float = 60.0
 
 
 # Judgement-heavy roles get the primary model; high-volume, narrow roles get the cheaper one.
 # Each role falls back to the other tier.
 ROLE_SPECS: dict[Role, RoleSpec] = {
-    Role.PLANNER: RoleSpec(Tier.PRIMARY, 4_000),
-    Role.RESEARCHER: RoleSpec(Tier.SECONDARY, 2_000),
-    Role.EXTRACTOR: RoleSpec(Tier.SECONDARY, 4_000),
-    Role.SYNTHESIS: RoleSpec(Tier.PRIMARY, 8_000),
-    Role.WRITER: RoleSpec(Tier.PRIMARY, 8_000, temperature=0.2),
-    Role.GROUNDING: RoleSpec(Tier.SECONDARY, 2_000),
-    Role.FACT_CHECK: RoleSpec(Tier.SECONDARY, 1_000),
-    Role.DIFF: RoleSpec(Tier.SECONDARY, 2_000),
+    Role.PLANNER: RoleSpec(Tier.PRIMARY, 4_000, reasoning_effort=None, timeout_s=90),
+    Role.RESEARCHER: RoleSpec(Tier.SECONDARY, 3_000),
+    Role.EXTRACTOR: RoleSpec(Tier.SECONDARY, 3_000),
+    Role.SYNTHESIS: RoleSpec(Tier.SECONDARY, 5_000, timeout_s=90),  # claims from passages: narrow work
+    Role.WRITER: RoleSpec(Tier.PRIMARY, 10_000, temperature=0.2, reasoning_effort=None, timeout_s=240),
+    Role.GROUNDING: RoleSpec(Tier.SECONDARY, 5_000, timeout_s=90),
+    Role.FACT_CHECK: RoleSpec(Tier.SECONDARY, 1_500),
+    Role.DIFF: RoleSpec(Tier.SECONDARY, 3_000),
     Role.SUMMARIZER: RoleSpec(Tier.SECONDARY, 1_500),
-    Role.GUARDRAIL: RoleSpec(Tier.SECONDARY, 500),
+    Role.GUARDRAIL: RoleSpec(Tier.SECONDARY, 1_000),
 }
 
 
@@ -132,13 +140,14 @@ class ModelGateway:
             model=self.model_name(tier or spec.tier),
             base_url=s.openrouter_base_url,
             api_key=s.openrouter_api_key,
-            timeout=s.llm_timeout_s,
+            timeout=spec.timeout_s,
             max_retries=s.llm_max_retries,
             max_tokens=spec.max_tokens,
             temperature=spec.temperature,
             default_headers={"HTTP-Referer": s.openrouter_app_url, "X-Title": s.openrouter_app_name},
             callbacks=[self.meter] if self.meter else None,
             metadata={"role": role.value},
+            extra_body={"reasoning": {"effort": spec.reasoning_effort}} if spec.reasoning_effort else None,
         )
 
     def fallback_model(self, role: Role) -> BaseChatModel:

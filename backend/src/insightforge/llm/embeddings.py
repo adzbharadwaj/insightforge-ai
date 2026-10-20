@@ -6,6 +6,7 @@ model means re-indexing every collection.
 """
 
 import asyncio
+import threading
 from functools import lru_cache
 
 from fastembed import TextEmbedding
@@ -18,13 +19,20 @@ def _model() -> TextEmbedding:
     return TextEmbedding(model_name=get_settings().embedding_model)
 
 
+# ONNX already uses every core for one call; concurrent calls from parallel sub-tasks only thrash the CPU
+# (a live run spent 133 s in sys time). One inference at a time.
+_lock = threading.Lock()
+
+
 def embed_documents_sync(texts: list[str]) -> list[list[float]]:
-    return [vec.tolist() for vec in _model().embed(texts)]
+    with _lock:
+        return [vec.tolist() for vec in _model().embed(texts)]
 
 
 def embed_query_sync(text: str) -> list[float]:
     # query_embed applies the model's query instruction (bge uses one), which improves retrieval.
-    return next(iter(_model().query_embed(text))).tolist()
+    with _lock:
+        return next(iter(_model().query_embed(text))).tolist()
 
 
 async def embed_documents(texts: list[str]) -> list[list[float]]:

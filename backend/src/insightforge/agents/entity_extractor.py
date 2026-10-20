@@ -6,6 +6,10 @@ brief, no summaries). Its `extract_entities` tool resolves each id and runs one
 small extraction call per source, so no prompt ever holds more than one source.
 The tool output is accumulated in code; the graph, conflict flags and embeddings
 are built from that, never retyped by a model.
+
+Each extraction call covers `per_call` sources (default 4), each wrapped separately and
+answered per source id: the fixed cost of a structured call (system prompt, schema and
+provider scaffolding, ~2.2k tokens) was two thirds of the cost when sources went one by one.
 """
 
 import asyncio
@@ -19,7 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 from insightforge.agents.planner import build_delegating_agent, delegation_message
 from insightforge.agents.prompts import ENTITY_EXTRACTOR_PROMPT, EXTRACTION_PROMPT, render_entity_prompt
 from insightforge.agents.subagent import isolated_subagent
-from insightforge.graph.state import EntityExtractionResult, EntityGraph, SourceExtraction
+from insightforge.graph.state import BatchExtraction, EntityExtractionResult, EntityGraph, SourceExtraction
 from insightforge.guardrails.untrusted import wrap
 from insightforge.llm.gateway import ModelGateway, Role, TokenBudgetExceeded
 from insightforge.store.models import SubTaskStatus
@@ -42,23 +46,28 @@ class EntityExtraction:
         log: RunLog,
         assigned: list[str],
         *,
-        max_chars: int = 12_000,
+        max_chars: int = 5_000,
         concurrency: int = 4,
+        per_call: int = 4,
     ):
         self.gateway = gateway
         self.resolver = resolver
         self.log = log
         self.assigned = list(dict.fromkeys(assigned))
         self.max_chars = max_chars
+        self.per_call = per_call
         self._sem = asyncio.Semaphore(concurrency)
         self.collected: dict[str, tuple[ResolvedSource, SourceExtraction]] = {}
 
-    async def _extract_one(self, source: ResolvedSource) -> SourceExtraction:
+    async def _extract_group(self, group: list[ResolvedSource]) -> dict[str, SourceExtraction]:
         async with self._sem:
-            text = wrap(source.source_id, source.text[: self.max_chars], url=source.label, title=source.title)
-            return await self.gateway.structured(Role.EXTRACTOR, SourceExtraction).ainvoke(
+            text = "\n\n".join(wrap(s.source_id, s.text[: self.max_chars], url=s.label, title=s.title) for s in group)
+            out: BatchExtraction = await self.gateway.structured(Role.EXTRACTOR, BatchExtraction).ainvoke(
                 [SystemMessage(EXTRACTION_PROMPT), HumanMessage(text)]
             )
+        wanted = {s.source_id for s in group}
+        return {e.source_id: SourceExtraction(entities=e.entities, facts=e.facts)
+                for e in out.sources if e.source_id in wanted}
 
     async def extract(self, source_ids: list[str]) -> str:
         allowed = set(self.assigned)
@@ -68,20 +77,26 @@ class EntityExtraction:
         sources = await self.resolver.resolve_many(todo)
         missing = [i for i in todo if i not in {s.source_id for s in sources}]
 
-        results = await asyncio.gather(*(self._extract_one(s) for s in sources), return_exceptions=True)
+        groups = [sources[i:i + self.per_call] for i in range(0, len(sources), self.per_call)]
+        results = await asyncio.gather(*(self._extract_group(g) for g in groups), return_exceptions=True)
         failed = list(missing)
         entities = facts = 0
-        for source, result in zip(sources, results, strict=True):
+        for group, result in zip(groups, results, strict=True):
             if isinstance(result, TokenBudgetExceeded):
                 raise result  # a budget breach stops the run; it is not a per-source failure
             if isinstance(result, BaseException):
-                failed.append(source.source_id)
-                await self.log.emit(AGENT, "error", f"extraction failed for {source.source_id}",
+                failed += [s.source_id for s in group]
+                await self.log.emit(AGENT, "error", f"extraction failed for {len(group)} source(s)",
                                     error=f"{type(result).__name__}: {result}"[:300])
                 continue
-            self.collected[source.source_id] = (source, result)
-            entities += len(result.entities)
-            facts += len(result.facts)
+            for source in group:
+                ext = result.get(source.source_id)
+                if ext is None:  # the model skipped this source in its answer
+                    failed.append(source.source_id)
+                    continue
+                self.collected[source.source_id] = (source, ext)
+                entities += len(ext.entities)
+                facts += len(ext.facts)
 
         processed = len(sources) - (len(failed) - len(missing))
         parts = [f"Processed {processed} source(s): {entities} entities, {facts} facts."]
@@ -91,6 +106,9 @@ class EntityExtraction:
             parts.append(f"Already processed: {done}.")
         if foreign:
             parts.append(f"Not assigned to you, ignored: {foreign}.")
+        await self.log.progress(AGENT, f"extract_entities: {processed} processed, {len(failed)} failed, "
+                                       f"{len(done)} already done, {len(foreign)} not assigned",
+                                failed=failed, foreign=foreign[:20])
         return " ".join(parts)
 
     def graph(self) -> EntityGraph:
@@ -187,6 +205,15 @@ async def run_entity_wave(
     await agent.ainvoke({"messages": [HumanMessage(delegation_message([(TASK_ID, NAME)]))]})
     if TASK_ID not in wave.started:
         await log.emit(AGENT, "error", "entity extraction was not delegated")
+
+    # Fail-safe: the tool is deterministic, so sources the agent skipped (it answered without calling the
+    # tool, or dropped ids) are processed directly rather than silently leaving the graph incomplete.
+    missing = [i for i in extraction.assigned if i not in extraction.collected]
+    if missing:
+        await log.emit(AGENT, "retry", f"agent left {len(missing)} of {len(extraction.assigned)} source(s) "
+                                       "unprocessed; processing them directly", source_ids=missing[:50])
+        for start in range(0, len(missing), batch_size):
+            await extraction.extract(missing[start:start + batch_size])
 
     graph = extraction.graph()
     await log.progress(AGENT, f"entity graph: {len(graph.entities)} entities, {len(graph.relationships)} facts, "

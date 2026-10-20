@@ -15,9 +15,15 @@ import operator
 import uuid
 from typing import Annotated
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, field_validator, model_validator
 
+from insightforge.llm.schema import clip
 from insightforge.store.models import RunStatus, SourceKind, SourceType, SubTaskStatus
+
+
+def _merge(a: dict, b: dict) -> dict:
+    return {**a, **b}
+
 
 MAX_SUBTASKS = 6  # hard ceiling from the assignment; config may lower it, never raise it
 
@@ -33,17 +39,28 @@ class Confidence(enum.StrEnum):
 
 class SubTaskSpec(BaseModel):
     id: str = Field(pattern=r"^st-\d{1,2}$", description='Sub-task id, e.g. "st-1"')
-    query: str = Field(min_length=3, max_length=300)
-    scope: str = Field(max_length=300, description="What is in and out of bounds for this sub-task")
+    query: Annotated[str, clip(300)] = Field(min_length=3, max_length=300)
+    scope: Annotated[str, clip(300)] = Field(max_length=300, description="What is in and out of bounds for this sub-task")
     source_type: SourceType
-    time_horizon: str = Field(max_length=64, description='e.g. "last 18 months"')
+    time_horizon: Annotated[str, clip(64)] = Field(max_length=64, description='e.g. "last 18 months"')
     priority: int = Field(ge=1, le=MAX_SUBTASKS, description="1 = most important")
+
+
+def _top_priority(v):
+    if isinstance(v, list) and len(v) > MAX_SUBTASKS:
+        def priority(t):
+            p = t.get("priority") if isinstance(t, dict) else getattr(t, "priority", None)
+            return p if isinstance(p, int) else MAX_SUBTASKS + 1
+        return sorted(v, key=priority)[:MAX_SUBTASKS]
+    return v
 
 
 class TaskGraph(BaseModel):
     """Planner output. Either a clarifying question or 1–6 sub-tasks, never both."""
 
-    sub_tasks: list[SubTaskSpec] = Field(default_factory=list, max_length=MAX_SUBTASKS)
+    # More than the cap: keep the highest-priority ones rather than failing the plan.
+    sub_tasks: Annotated[list[SubTaskSpec], BeforeValidator(_top_priority)] = Field(
+        default_factory=list, max_length=MAX_SUBTASKS)
     clarifying_question: str | None = None
 
     @model_validator(mode="after")
@@ -69,7 +86,7 @@ class SourceRef(BaseModel):
 
     source_id: str = Field(max_length=64)
     kind: SourceKind
-    summary: str = Field(max_length=300, description="One line, written by the researcher")
+    summary: Annotated[str, clip(300)] = Field(max_length=300, description="One line, written by the researcher")
     credibility: float | None = Field(default=None, ge=0, le=1)
 
 
@@ -122,21 +139,31 @@ SINGLE_VALUED = frozenset({
 class ExtractedEntity(BaseModel):
     """LLM output for one source (the extraction call). Normalized into Entity by code."""
 
-    name: str = Field(max_length=200)
+    name: Annotated[str, clip(200)] = Field(max_length=200)
     type: EntityType
 
 
 class ExtractedFact(BaseModel):
-    subject: str = Field(max_length=200, description="An entity name exactly as listed in entities")
+    subject: Annotated[str, clip(200)] = Field(max_length=200, description="An entity name exactly as listed in entities")
     predicate: Predicate
-    object: str = Field(max_length=200)
-    qualifier: str | None = Field(default=None, max_length=100)
+    object: Annotated[str, clip(200)] = Field(max_length=200)
+    qualifier: Annotated[str | None, clip(100)] = Field(default=None, max_length=100)
     date: str | None = Field(default=None, description="YYYY-MM-DD if the source states when")
 
 
 class SourceExtraction(BaseModel):
-    entities: list[ExtractedEntity] = Field(default_factory=list, max_length=25)
-    facts: list[ExtractedFact] = Field(default_factory=list, max_length=25)
+    entities: Annotated[list[ExtractedEntity], clip(15)] = Field(default_factory=list, max_length=15)
+    facts: Annotated[list[ExtractedFact], clip(15)] = Field(default_factory=list, max_length=15)
+
+
+class SourceEntities(SourceExtraction):
+    source_id: str = Field(description="The id of the source these entities and facts come from")
+
+
+class BatchExtraction(BaseModel):
+    """One extraction call covers a few sources (each wrapped separately) to amortize the fixed prompt cost."""
+
+    sources: list[SourceEntities] = Field(default_factory=list)
 
 
 class Entity(BaseModel):
@@ -188,15 +215,31 @@ class EntityExtractionResult(BaseModel):
 # --- Synthesis → Writer ----------------------------------------------------
 
 
+class SourceMeta(BaseModel):
+    """What a citation needs about one source. Built from storage, never from model output."""
+
+    source_id: str
+    kind: SourceKind
+    label: str = Field(description="Domain for web pages, 'file.pdf p.3' for PDF chunks")
+    url: str | None = None
+    title: str | None = None
+    published_date: dt.date | None = None
+    credibility: float | None = None
+
+
 class EvidenceItem(BaseModel):
     evidence_id: str = Field(pattern=r"^ev-\d+$")
     claim: str
-    source_ids: list[str] = Field(min_length=1)
+    source_ids: list[str] = Field(min_length=1, description="First = primary (highest credibility)")
     published_date: dt.date | None = None
     credibility: float = Field(ge=0, le=1)
     relevance: float = Field(ge=0, le=1)
     confidence: Confidence
     compressed: bool = False  # True when this item is a summary of lower-priority items
+    conflict: bool = False  # touches a fact the Entity Extractor flagged as conflicting
+    entity_keys: list[str] = Field(default_factory=list)
+    passage: str | None = Field(default=None, description="Exact source paragraph; for the citation drawer and "
+                                                         "fact-checking, never shown to the Writer")
 
 
 class EvidenceSection(BaseModel):
@@ -217,6 +260,7 @@ class Cut(BaseModel):
 
 class EvidenceBundle(BaseModel):
     sections: list[EvidenceSection]
+    sources: dict[str, SourceMeta] = Field(default_factory=dict)
     token_count: int
     token_budget: int
     cuts: list[Cut] = Field(default_factory=list)
@@ -227,21 +271,50 @@ class EvidenceBundle(BaseModel):
             raise ValueError(f"bundle is {self.token_count} tokens, budget is {self.token_budget}")
         return self
 
+    def items(self) -> dict[str, EvidenceItem]:
+        return {item.evidence_id: item for s in self.sections for item in s.evidence}
+
     def evidence_ids(self) -> set[str]:
-        return {item.evidence_id for s in self.sections for item in s.evidence}
+        return set(self.items())
 
 
 # --- Writer → Grounding → Fact-Checker -------------------------------------
 
 
+class WrittenSentence(BaseModel):
+    text: Annotated[str, clip(800)] = Field(max_length=800)
+    evidence_ids: list[str] = Field(default_factory=list,
+                                    description="Evidence ids this sentence relies on; empty only for "
+                                                "non-factual connective sentences")
+
+
+class WrittenSection(BaseModel):
+    sub_task_id: str
+    heading: Annotated[str, clip(120)] = Field(max_length=120)
+    sentences: list[WrittenSentence]
+
+
+class WriterOutput(BaseModel):
+    """What the Writer model returns. Markdown, citations and confidence labels are rendered by code."""
+
+    title: Annotated[str, clip(150)] = Field(max_length=150)
+    executive_summary: list[WrittenSentence]
+    sections: list[WrittenSection]
+    gaps: list[str] = Field(default_factory=list)
+
+
 class ClaimRef(BaseModel):
+    """A checkable sentence: it cites evidence, or it contains a number (and so must cite evidence)."""
+
     claim_id: str = Field(pattern=r"^c-\d+$")
     section: str
     text: str
-    evidence_ids: list[str] = Field(min_length=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+    loc: str = Field(description='Where it sits in WriterOutput: "summary:<i>" or "section:<s>:<i>"')
 
 
 class Draft(BaseModel):
+    report: WriterOutput
     markdown: str
     claims: list[ClaimRef]
 
@@ -252,12 +325,38 @@ class GroundingResult(BaseModel):
     reasons: dict[str, str] = Field(default_factory=dict)
 
 
+class ClaimVerdict(BaseModel):
+    # Reason before verdict: the judge explains first, then decides. With the verdict first, a live run
+    # produced "supported: false" next to reasons that said the claim was supported.
+    claim_id: str
+    reason: Annotated[str, clip(300)] = Field(default="", max_length=300,
+                                              description="What the evidence does and does not state")
+    supported: bool
+
+
+class EntailmentVerdicts(BaseModel):
+    """LLM output of the grounding entailment check."""
+
+    verdicts: list[ClaimVerdict]
+
+
+class ClaimCheck(BaseModel):
+    claim_id: str
+    text: str
+    verified: bool
+    similarity: float | None = None
+    source_id: str | None = None
+    checked_against: str = Field(description="live | stored_copy | document | unavailable")
+    note: str = ""
+
+
 class FactCheckSummary(BaseModel):
     total_checked: int
     passed: int
     failed: int
     pass_rate: float
     unverified_claims: list[str]
+    checks: list[ClaimCheck] = Field(default_factory=list)
 
     @field_validator("pass_rate")
     @classmethod
@@ -293,4 +392,6 @@ class PipelineState(BaseModel):
     writer_attempts: int = 0
     fact_check: FactCheckSummary | None = None
     final_markdown: str | None = None
+    report_id: uuid.UUID | None = None
+    stage_tokens: Annotated[dict[str, int], _merge] = Field(default_factory=dict)
     error: str | None = None

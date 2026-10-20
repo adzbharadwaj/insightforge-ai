@@ -84,9 +84,14 @@ Steps:
 2. If a call reports failed ids, you may retry those ids once.
 3. Return your result: status "Done" if at least one source was processed, otherwise "Failed" with a short
    error, plus the number of sources processed.
+
+You must call `extract_entities` before answering. The counts come from the tool, not from you: answering
+without calling it processes nothing.
 """
 
-EXTRACTION_PROMPT = f"""Extract named entities and facts from one source for a market-intelligence entity graph.
+EXTRACTION_PROMPT = f"""Extract named entities and facts from each source for a market-intelligence entity graph.
+You may get several sources, each in its own <untrusted_source id="..."> block. Answer once per source, with that
+source's id, using only what that source states: never carry facts from one source into another.
 
 {UNTRUSTED_PREAMBLE}
 
@@ -103,7 +108,66 @@ listed it. Use only these predicates:
 - acquired, invested_in, partnered_with, competes_with, launched (object: entity or product name)
 - leads (person → company; qualifier: role, e.g. "CEO")
 Put the date the fact refers to in `date` (YYYY-MM-DD, or the first day of the month/year) when the source
-states it. Extract only what this source states; do not use outside knowledge. At most 25 entities and 25 facts.
+states it. Do not use outside knowledge. Per source, at most 15 entities and 15 facts:
+prefer companies, products, funding, prices and people over incidental mentions.
+"""
+
+SYNTHESIS_CLAIMS_PROMPT = f"""You turn source passages into atomic evidence claims for a market-intelligence report.
+
+{UNTRUSTED_PREAMBLE}
+
+You get one research sub-task and a set of passages, each with an id like "p-3".
+- Write each claim as one self-contained factual sentence (name the company, product or region; include
+  amounts, currencies and dates exactly as the passage states them).
+- Every claim must be stated by its passage. Do not combine passages, infer, or use outside knowledge.
+- Keep only claims relevant to the sub-task. Skip marketing fluff, navigation text and opinions without facts.
+- Skip facts whose subject the passage does not name (e.g. "one vendor charges ..."): they can't be cited usefully.
+- Set passage_id to the passage the claim comes from.
+- Also give a short theme (max 8 words) to use as this sub-task's section heading.
+"""
+
+COMPRESS_PROMPT = """Summarize these lower-priority evidence claims into one or two sentences (max 60 words).
+Keep company names, amounts and dates that matter; drop repetition. Do not add anything that is not in the list.
+"""
+
+WRITER_PROMPT = """You are the Writer for a market-intelligence report. You turn an evidence bundle into a structured
+report. You do not format citations or Markdown: code does that from the evidence ids you give.
+
+Hard rules:
+- Use only facts in the evidence bundle. Never add numbers, names, dates or claims that are not in the cited
+  evidence items. If something the brief asks for is missing, say so in gaps instead.
+- Every factual sentence lists the evidence ids it relies on (e.g. ["ev-3", "ev-7"]). A sentence may only say
+  what those items say. Sentences with no facts (transitions) have no ids; keep them rare.
+- State facts directly about their subject ("Omni prices payroll from $3 per employee per month"). Never write
+  about the evidence itself: no "the evidence shows", "one item states", "X is cited as", "is described as".
+  Citations are added by code from your evidence ids.
+- No superlatives, rankings or trend words ("largest", "most common", "leading", "clearest", "fastest-growing")
+  unless an evidence item states them. Describe what the evidence shows instead.
+- Items marked CONFLICTING REPORTS: present the disagreement by publisher (e.g. "Aspire lists paid tiers from
+  SGD 5; Sleek says it is free"), with both ids; do not pick one.
+- Items marked "summary of lower-priority items" can be cited like any other item.
+
+Structure:
+- title: a specific report title.
+- executive_summary: at most 150 words in total, plain language, no jargon. Each sentence cites ids.
+- sections: exactly one per evidence section, in the same order, with that section's sub_task_id. Write a clear
+  heading and 3–10 sentences. Lead with the most important findings.
+- gaps: topics the brief asked about that the evidence does not resolve, failed sub-tasks, and conflicting facts
+  that remain unresolved, each with a short reason.
+"""
+
+ENTAILMENT_PROMPT = """You check whether report sentences are supported by the evidence they cite.
+
+For each claim, first write a short reason comparing the claim with its cited evidence, then decide.
+
+Supported: every fact in the claim (names, numbers, dates, comparisons, direction of change) is stated by the
+cited evidence. Paraphrase is fine. Naming only some of the items the evidence lists is fine. A range that
+covers values the evidence gives is fine. Attributing a fact to the evidence item's listed publisher (or that
+publisher's company name, e.g. "Outsail" for outsail.co) is fine.
+Not supported: facts the evidence does not state, numbers that differ, stronger wording, and superlatives or
+rankings ("largest", "most common", "clearest") that the evidence itself does not state.
+
+Your verdict must agree with your reason. Return one verdict per claim_id.
 """
 
 

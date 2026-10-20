@@ -27,13 +27,20 @@ def test_every_role_has_a_spec():
 
 
 def test_chat_model_is_configured_for_openrouter():
-    gw = ModelGateway(_settings(llm_timeout_s=30))
+    gw = ModelGateway(_settings())
     m = gw.chat_model(Role.WRITER)
     assert m.model_name == "anthropic/claude-sonnet-5.5"
     assert m.openai_api_base == "https://openrouter.ai/api/v1"
     assert m.max_tokens == ROLE_SPECS[Role.WRITER].max_tokens
-    assert m.request_timeout == 30
+    assert m.request_timeout == ROLE_SPECS[Role.WRITER].timeout_s == 240  # sized for long reports
     assert m.default_headers["X-Title"] == "InsightForge AI"
+
+
+def test_reasoning_is_bounded_for_narrow_roles_only():
+    gw = ModelGateway(_settings())
+    assert gw.chat_model(Role.GROUNDING).extra_body == {"reasoning": {"effort": "low"}}
+    assert gw.fallback_model(Role.GROUNDING).extra_body == {"reasoning": {"effort": "low"}}  # Sonnet accepts "low"
+    assert gw.chat_model(Role.WRITER).extra_body is None  # judgment-heavy: provider default
 
 
 def test_roles_map_to_tiers_and_fallback_flips_tier():

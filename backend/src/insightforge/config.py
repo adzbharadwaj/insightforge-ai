@@ -31,8 +31,7 @@ class Settings(BaseSettings):
     # Slugs verified against openrouter.ai/api/v1/models (both support tool calling).
     model_primary: str = "anthropic/claude-sonnet-5.5"
     model_secondary: str = "anthropic/claude-haiku-5.5"
-    llm_timeout_s: float = 60.0
-    llm_max_retries: int = 2
+    llm_max_retries: int = 1  # per-role timeouts live in llm/gateway.py ROLE_SPECS
 
     # --- Embeddings (local FastEmbed) ---
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -49,18 +48,23 @@ class Settings(BaseSettings):
     max_subtasks: int = Field(6, ge=1, le=6)
     max_tool_calls_per_subagent: int = 12
     run_time_budget_s: int = 8 * 60
-    run_token_budget: int = 250_000
+    # Measured 2026-10-20: a clean run ≈ 185k (research ~75k, entities ~50k, synthesis ~24k, write ~14k,
+    # grounding ~20k); each writer retry adds ~34k. 300k fits the 2 allowed retries with margin.
+    run_token_budget: int = 300_000
     max_writer_retries: int = 2
     max_concurrent_runs: int = 4
     clarification_timeout_s: int = 30 * 60
 
     # --- Context engineering ---
     evidence_bundle_token_budget: int = 6_000
+    synthesis_passages_per_source: int = 3  # most query-relevant paragraphs taken from each source
+    high_credibility_threshold: float = 0.6  # single source at/above this → MEDIUM confidence
     memory_summaries_loaded: int = 3
     doc_reader_top_k: int = 8
     doc_min_relevance: float = 0.3  # chunks below this cosine score are not shown to the Doc Reader
     entity_batch_size: int = 10  # source ids per extract_entities call
-    entity_source_max_chars: int = 12_000  # per-source text sent to the extraction model
+    entity_max_sources: int = 20  # most credible sources only: the stage costs ~3k tokens per source
+    entity_source_max_chars: int = 5_000  # per-source text sent to the extraction model (cost driver)
     entity_concurrency: int = 4
     related_entities_loaded: int = 5  # past-run entities shown to the Planner
 

@@ -9,7 +9,14 @@ from qdrant_client import models
 from test_planner import planner_rule
 
 from insightforge.agents.entity_extractor import EntityExtraction, run_entity_wave
-from insightforge.graph.state import EntityType, ExtractedEntity, ExtractedFact, Predicate, SourceExtraction
+from insightforge.graph.state import (
+    BatchExtraction,
+    EntityType,
+    ExtractedEntity,
+    ExtractedFact,
+    Predicate,
+    SourceEntities,
+)
 from insightforge.llm.gateway import Role, TokenBudgetExceeded
 from insightforge.store.entity_store import load_related_entities, save_entity_graph, upsert_entity_embeddings
 from insightforge.store.models import Run, SourceKind
@@ -25,19 +32,26 @@ PAGES = {
 }
 
 
+_BLOCK = re.compile(r'<untrusted_source id="([^"]+)"[^>]*>(.*?)</untrusted_source>', re.DOTALL)
+
+
 def extract_fn(seen: list[str]):
-    """Stands in for the extraction model: reads the one source it is given."""
+    """Stands in for the extraction model: answers per source block, reading only that block."""
 
     def fn(messages):
         text = messages[-1].content
         seen.append(text)
-        amount = re.search(r"(US\$7\.6 million|\$7\.6M|USD 12 million)", text).group(1)
-        return SourceExtraction(
-            entities=[ExtractedEntity(name="Salary Hero", type=EntityType.COMPANY),
-                      ExtractedEntity(name="Cento Ventures", type=EntityType.COMPANY)],
-            facts=[ExtractedFact(subject="Salary Hero", predicate=Predicate.RAISED, object=amount,
-                                 qualifier="Series A", date="2026-03")],
-        )
+        out = []
+        for source_id, body in _BLOCK.findall(text):
+            amount = re.search(r"(US\$7\.6 million|\$7\.6M|USD 12 million)", body).group(1)
+            out.append(SourceEntities(
+                source_id=source_id,
+                entities=[ExtractedEntity(name="Salary Hero", type=EntityType.COMPANY),
+                          ExtractedEntity(name="Cento Ventures", type=EntityType.COMPANY)],
+                facts=[ExtractedFact(subject="Salary Hero", predicate=Predicate.RAISED, object=amount,
+                                     qualifier="Series A", date="2026-03")],
+            ))
+        return BatchExtraction(sources=out)
 
     return fn
 
@@ -69,12 +83,11 @@ async def test_entity_wave_isolated_one_source_per_call_and_flags_conflict(commi
 
     graph = await run_entity_wave(gw, resolver, RunLog(maker, run_id), ids, batch_size=10)
 
-    # The extractor agent got ids only; each extraction call got exactly one source.
+    # The extractor agent got ids only; the three sources went in one batched call, each wrapped separately.
     agent_inputs = "".join(str(m.content) for call in extractor.seen for m in call if isinstance(m, HumanMessage))
     assert all(i in agent_inputs for i in ids) and "Salary Hero" not in agent_inputs
-    assert len(seen_by_extraction) == 3
-    assert all(sum(body in text for body in PAGES.values()) == 1 for text in seen_by_extraction)
-    assert all("<untrusted_source" in text for text in seen_by_extraction)
+    assert len(seen_by_extraction) == 1
+    assert [sid for sid, _ in _BLOCK.findall(seen_by_extraction[0])] == ids
 
     assert {e.key for e in graph.entities} == {"company:salaryhero", "company:centoventures"}
     [conflict] = graph.conflicts
@@ -87,7 +100,7 @@ async def test_extraction_ignores_unassigned_ids_and_reports_failures(committed_
     ids = await stored_sources(maker, run_id)
     calls = []
 
-    def flaky(messages):
+    def flaky(messages):  # one source per call here, so a failure hits exactly one source
         calls.append(1)
         if "USD 12 million" in messages[-1].content:
             raise RuntimeError("model hiccup")
@@ -95,7 +108,7 @@ async def test_extraction_ignores_unassigned_ids_and_reports_failures(committed_
 
     gw = FakeGateway({}, {Role.EXTRACTOR: flaky})
     resolver = SourceResolver(ScratchStore(maker, run_id), None, user_id)
-    extraction = EntityExtraction(gw, resolver, RunLog(maker, run_id), ids[:3])
+    extraction = EntityExtraction(gw, resolver, RunLog(maker, run_id), ids[:3], per_call=1)
     out = await extraction.extract([*ids, "src-notassigned1"])
     assert "Processed 2 source(s)" in out and f"Failed ids: ['{ids[2]}']" in out
     assert "Not assigned to you, ignored: ['src-notassigned1']" in out
@@ -143,3 +156,36 @@ async def test_graph_is_persisted_and_entities_are_recalled_per_user(committed_r
     finally:
         await vectors.client.delete(ENTITIES, points_selector=models.FilterSelector(filter=models.Filter(must=[
             models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))])))
+
+
+async def test_sources_the_agent_skips_are_processed_directly(committed_run):
+    """Live runs showed the extractor agent sometimes answering without calling its tool."""
+    from sqlalchemy import select
+
+    from insightforge.store.models import RunEvent
+
+    maker, user_id, run_id = committed_run
+    ids = await stored_sources(maker, run_id)
+    lazy = RuleModel(rule=lambda messages: AIMessage(content=json.dumps({"status": "Done", "processed": 3})))
+    gw = FakeGateway({Role.PLANNER: RuleModel(rule=planner_rule()), Role.EXTRACTOR: lazy},
+                     {Role.EXTRACTOR: extract_fn([])})
+    graph = await run_entity_wave(gw, SourceResolver(ScratchStore(maker, run_id), None, user_id),
+                                  RunLog(maker, run_id), ids)
+    assert len(graph.conflicts) == 1  # all three sources were extracted despite the lazy agent
+    async with maker() as s:
+        retries = (await s.scalars(select(RunEvent).where(RunEvent.run_id == run_id, RunEvent.kind == "retry"))).all()
+    assert "left 3 of 3 source(s) unprocessed" in retries[0].message
+
+
+async def test_sources_the_model_leaves_out_of_a_batch_count_as_failed(committed_run):
+    maker, user_id, run_id = committed_run
+    ids = await stored_sources(maker, run_id)
+
+    def drops_last(messages):
+        out = extract_fn([])(messages)
+        return BatchExtraction(sources=out.sources[:-1])
+
+    extraction = EntityExtraction(FakeGateway({}, {Role.EXTRACTOR: drops_last}),
+                                  SourceResolver(ScratchStore(maker, run_id), None, user_id), RunLog(maker, run_id), ids)
+    out = await extraction.extract(ids)
+    assert "Processed 2 source(s)" in out and f"Failed ids: ['{ids[2]}']" in out
