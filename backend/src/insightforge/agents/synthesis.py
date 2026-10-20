@@ -12,7 +12,8 @@ at once:
              source becomes primary, the others count as corroboration;
 5. score     confidence: conflict → LOW; 2+ independent sources → HIGH; one source with
              credibility ≥ threshold → MEDIUM; else LOW;
-6. rank      recency (month) → credibility → relevance to the brief;
+6. rank      recency (month) → credibility → relevance to the brief (sources published before the
+             sub-task's time horizon, with 25% slack, are excluded first and the exclusion is noted);
 7. compress  while the rendered bundle is over budget, summarize the lowest-ranked tail of the
              largest section into one item (then drop, as a last resort); every cut is logged.
 
@@ -20,6 +21,7 @@ Steps 4–7 are code, so the bundle's structure and confidence labels are reprod
 """
 
 import asyncio
+import datetime as dt
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -52,8 +54,10 @@ from insightforge.store.sources import ResolvedSource, SourceResolver
 from insightforge.tools.credibility import registered_host
 from insightforge.tools.entities import numbers_in
 from insightforge.tools.lexical import shortlist
+from insightforge.tools.search_providers import horizon_to_days
 
 AGENT = "synthesis"
+HORIZON_SLACK = 1.25  # "last 12 months" keeps up to 15 months: dates are often approximate
 PASSAGE_MIN, PASSAGE_MAX = 300, 1_200
 DEDUPE_SIMILARITY = 0.9
 
@@ -271,6 +275,7 @@ class Synthesizer:
         token_budget: int = 6_000,
         passages_per_source: int = 3,
         high_credibility: float = 0.6,
+        today: dt.date | None = None,
     ):
         self.gateway = gateway
         self.resolver = resolver
@@ -278,6 +283,24 @@ class Synthesizer:
         self.token_budget = token_budget
         self.passages_per_source = passages_per_source
         self.high_credibility = high_credibility
+        self.today = today or dt.date.today()
+        self.notes: list[str] = []
+
+    async def _within_horizon(self, spec: SubTaskSpec, sources: list[ResolvedSource]) -> list[ResolvedSource]:
+        """Drop dated sources older than the sub-task's horizon (+25% slack). Undated sources and PDF chunks stay:
+        their age is unknown, and they already rank last on recency."""
+        days = horizon_to_days(spec.time_horizon)
+        if days is None:
+            return sources
+        cutoff = self.today - dt.timedelta(days=int(days * HORIZON_SLACK))
+        old = [s for s in sources if s.published_date and s.published_date < cutoff]
+        if old:
+            labels = sorted({_meta(s).label for s in old})
+            note = (f"{spec.id}: excluded {len(old)} source(s) published before {cutoff.isoformat()} "
+                    f"(outside '{spec.time_horizon}'): {', '.join(labels)}")
+            self.notes.append(note)
+            await self.log.emit(AGENT, "cut", note, sub_task_id=spec.id, source_ids=[s.source_id for s in old])
+        return [s for s in sources if s not in old]
 
     async def run(
         self,
@@ -313,7 +336,7 @@ class Synthesizer:
         sections = self._sections(merged, sources, entity_graph, themes, [r.sub_task_id for r in done])
         sections, cuts = await self._compress(sections, sources)
         bundle = EvidenceBundle(sections=sections, sources=sources, cuts=cuts, token_budget=self.token_budget,
-                                token_count=count_tokens(render_bundle(sections, sources)))
+                                token_count=count_tokens(render_bundle(sections, sources)), notes=self.notes)
         corpus = sum(count_tokens(s.text) for s in resolved.values())
         await self.log.progress(
             AGENT,
@@ -325,6 +348,7 @@ class Synthesizer:
         return SynthesisResult(bundle, corpus, passage_tokens)
 
     async def _claims_for(self, spec: SubTaskSpec, sources: list[ResolvedSource]):
+        sources = await self._within_horizon(spec, sources)
         passages = await select_passages(sources, f"{spec.query}. {spec.scope}", self.passages_per_source)
         if not passages:
             return spec.id, spec.query[:80], [], 0

@@ -1,0 +1,95 @@
+{
+  "run_id": "ca38f566-8158-4574-b4c8-b694a6a76fae",
+  "brief_id": "ev-charging-eu",
+  "brief": "European EV fast-charging networks: the largest operators by number of high-power chargers, typical pricing per kWh, and expansion plans announced in the last 12 months.",
+  "evaluated_at": "2026-10-20T13:04:24.531464+00:00",
+  "models": [
+    "anthropic/claude-sonnet-5.5",
+    "anthropic/claude-haiku-5.5"
+  ],
+  "status": "COMPLETE",
+  "attempts": 1,
+  "tokens_used": 217379,
+  "wall_seconds": 218.3,
+  "error": null,
+  "stage_tokens": {
+    "entities": 62423,
+    "ground": 49007,
+    "research": 59295,
+    "plan": 2063,
+    "synthesize": 15341,
+    "write": 29250,
+    "fact_check": 0
+  },
+  "writer_attempts": 3,
+  "sub_tasks": {
+    "total": 4,
+    "done": 4
+  },
+  "context": {
+    "raw_corpus_tokens": 121382,
+    "planner_received_tokens": 1230,
+    "writer_bundle_tokens": 2518,
+    "bundle_budget": 6000,
+    "compression_cuts": 0,
+    "evidence_items": 39,
+    "sources": 15,
+    "notes": [
+      "st-2: excluded 1 source(s) published before 2025-07-27 (outside 'last 12 months'): numerama.com",
+      "st-4: excluded 1 source(s) published before 2024-12-14 (outside 'last 18 months'): transportenvironment.org"
+    ]
+  },
+  "fact_check": {
+    "total_checked": 7,
+    "passed": 6,
+    "failed": 1,
+    "pass_rate": 0.8571
+  },
+  "structure": {
+    "has_executive_summary": true,
+    "summary_within_150_words": true,
+    "has_gaps_section": true,
+    "every_section_has_confidence": true,
+    "uses_citation_format": true,
+    "thematic_sections": 4,
+    "must_cover_hit": [
+      "Ionity",
+      "Tesla",
+      "kWh",
+      "AFIR",
+      "Germany"
+    ],
+    "must_cover_rate": 1.0
+  },
+  "citations": {
+    "claims_checked": 37,
+    "supported": 37,
+    "accuracy": 1.0,
+    "unresolvable_citations": 0,
+    "unsupported": []
+  },
+  "quality": {
+    "coverage": {
+      "reason": "Covers operator counts, per-kWh pricing and expansions and adds AFIR, but operator ranking by high-power chargers is not answered and several operators lack data.",
+      "score": 3
+    },
+    "structure": {
+      "reason": "Follows the expected sections in order with clear headings and a dedicated gaps section, though the policy section is titled differently from the brief's expected label.",
+      "score": 4
+    },
+    "faithfulness": {
+      "reason": "Most claims carry dates, sources and credibility scores, and conflicting figures are shown side by side, but some sources are weak and a few claims (e.g. the 180% exceedance and 79% figure) are single-source with no corroboration.",
+      "score": 3
+    },
+    "gaps_honesty": {
+      "reason": "The gaps section plainly states missing operator rankings, unresolved Spain and Hungary pricing conflicts, undated EnBW target, and excluded out-of-window sources.",
+      "score": 5
+    },
+    "clarity": {
+      "reason": "Concise and readable with confidence labels per section, though the executive summary repeats body content and some paragraphs are dense with inline citations.",
+      "score": 4
+    },
+    "overall": 3.8
+  },
+  "report_id": "751d9b5f-e317-41cf-9bbc-94d544c38bc8"
+}

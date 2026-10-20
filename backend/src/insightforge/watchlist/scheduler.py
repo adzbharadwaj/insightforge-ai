@@ -90,9 +90,13 @@ async def run() -> None:
     settings = get_settings()
     _queue = await create_pool(redis_settings())
     scheduler = build_scheduler(settings)
-    scheduler.start()
+    # Reconcile before any job can fire: a persisted job may carry a stale interval (or a deleted item), and
+    # APScheduler would otherwise run its missed firing on start, before the first reconcile corrects it.
+    scheduler.start(paused=True)
+    await reconcile(scheduler)
+    scheduler.resume()
     scheduler.add_job(reconcile, IntervalTrigger(seconds=settings.scheduler_reconcile_s), args=[scheduler],
-                      id="reconcile", jobstore="local", next_run_time=dt.datetime.now(dt.UTC))
+                      id="reconcile", jobstore="local")
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

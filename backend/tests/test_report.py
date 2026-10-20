@@ -394,3 +394,22 @@ async def test_entailment_judge_sees_publishers():
                                                  evidence_ids=["ev-1"])), b)
     await check_grounding(FakeGateway({}, {Role.GROUNDING: judge}), draft, b)
     assert "ev-1 [published by e27.co]" in seen[0]
+
+
+async def test_sources_outside_the_time_horizon_are_excluded_and_noted(committed_run):
+    maker, user_id, run_id = committed_run
+    scratch = ScratchStore(maker, run_id)
+    fresh = await scratch.put(kind=SourceKind.WEB_PAGE, key="https://e27.co/new", url="https://e27.co/new",
+                              published_date=dt.date(2026, 9, 1), credibility=0.8,
+                              body_text="Salary Hero raised US$7.6 million in a Series A led by Cento Ventures.")
+    stale = await scratch.put(kind=SourceKind.WEB_PAGE, key="https://old.example/a", url="https://old.example/a",
+                              published_date=dt.date(2022, 7, 8), credibility=0.9,
+                              body_text="Kini raised US$4.3 million in a seed round led by East Ventures.")
+    undated = await scratch.put(kind=SourceKind.WEB_PAGE, key="https://nodate.example/b", url="https://nodate.example/b",
+                                credibility=0.5, body_text="GajiGesa raised US$2.5 million in seed funding.")
+    synth = Synthesizer(FakeGateway({}, REPORT_FNS), SourceResolver(scratch, None, user_id), RunLog(maker, run_id),
+                        today=dt.date(2026, 10, 20))
+    bundle = (await synth.run("payroll funding", [SPEC], results_for([fresh, stale, undated]), None)).bundle
+    used = {sid for s in bundle.sections for i in s.evidence for sid in i.source_ids}
+    assert fresh in used and undated in used and stale not in used  # "last 12 months" (+25% slack)
+    assert len(bundle.notes) == 1 and "old.example" in bundle.notes[0] and "2025-07" in bundle.notes[0]

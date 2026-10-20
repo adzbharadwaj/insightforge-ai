@@ -1,0 +1,52 @@
+[
+  {
+    "id": "payroll-sea",
+    "industry": "B2B SaaS / HR tech",
+    "question_type": "Competitive landscape (players, pricing, funding)",
+    "brief": "Competitive landscape for B2B payroll software in Southeast Asia: key players, pricing models, and recent funding in the last 12 months.",
+    "source_prefs": {"web": true, "docs": false, "memory": true},
+    "expected_sections": ["Key players by segment", "Pricing models", "Recent funding", "Regulatory / compliance drivers"],
+    "must_cover": ["pricing", "per employee", "funding", "Singapore", "Malaysia", "Indonesia"],
+    "notes": "Expect named vendors split by segment (enterprise vs SMB), published per-employee prices with currencies, and dated funding rounds. Conflicting funding figures should be shown side by side."
+  },
+  {
+    "id": "ev-charging-eu",
+    "industry": "Energy / mobility",
+    "question_type": "Market structure and expansion",
+    "brief": "European EV fast-charging networks: the largest operators by number of high-power chargers, typical pricing per kWh, and expansion plans announced in the last 12 months.",
+    "source_prefs": {"web": true, "docs": false, "memory": true},
+    "expected_sections": ["Largest operators", "Pricing per kWh", "Announced expansions", "Policy context (AFIR)"],
+    "must_cover": ["Ionity", "Tesla", "kWh", "AFIR", "Germany"],
+    "notes": "Expect operator counts with dates and sources, price ranges by country/operator with currency, and expansion announcements with dates. Counts from different sources often disagree; expect LOW confidence where they do."
+  },
+  {
+    "id": "bnpl-regulation",
+    "industry": "Financial services",
+    "question_type": "Regulatory change and company response",
+    "brief": "How are UK and EU regulators changing Buy Now Pay Later rules in 2025-2026, and how are Klarna and other BNPL providers responding?",
+    "source_prefs": {"web": true, "docs": false, "memory": true},
+    "expected_sections": ["UK rules (FCA)", "EU rules (Consumer Credit Directive)", "Provider responses", "Timeline"],
+    "must_cover": ["FCA", "Consumer Credit Directive", "Klarna", "affordability"],
+    "notes": "Expect dated regulatory milestones (consultations, effective dates), what changes for providers (affordability checks, disclosures), and named company responses. Speculation should be labelled as such or left to Gaps."
+  },
+  {
+    "id": "glp1-market",
+    "industry": "Healthcare / pharma",
+    "question_type": "Supply, pricing and new entrants",
+    "brief": "GLP-1 obesity drugs: supply constraints, list and net pricing trends, and new entrants beyond Novo Nordisk and Eli Lilly over the last 12 months.",
+    "source_prefs": {"web": true, "docs": false, "memory": true},
+    "expected_sections": ["Supply and shortages", "Pricing", "Pipeline and new entrants", "Market outlook"],
+    "must_cover": ["semaglutide", "tirzepatide", "shortage", "price", "Novo Nordisk", "Eli Lilly"],
+    "notes": "Expect shortage status with dates (e.g. regulator shortage lists), list prices with currency and market, and named pipeline candidates with trial phase. Medical claims must stay factual and sourced."
+  },
+  {
+    "id": "vector-db",
+    "industry": "Developer infrastructure / AI",
+    "question_type": "Vendor comparison and funding",
+    "brief": "Vector database market: leading vendors, their pricing models for managed services, and funding rounds in the last 18 months.",
+    "source_prefs": {"web": true, "docs": false, "memory": true},
+    "expected_sections": ["Leading vendors", "Managed-service pricing", "Funding", "Positioning (standalone vs built into existing databases)"],
+    "must_cover": ["Pinecone", "Weaviate", "Qdrant", "pricing", "funding"],
+    "notes": "Expect named vendors with open-source vs managed positioning, pricing units (per pod/hour, per GB, per query), and dated funding rounds with lead investors."
+  }
+]

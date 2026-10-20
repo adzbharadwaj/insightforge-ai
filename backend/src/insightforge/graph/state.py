@@ -264,6 +264,7 @@ class EvidenceBundle(BaseModel):
     token_count: int
     token_budget: int
     cuts: list[Cut] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)  # for the Writer's Gaps section (e.g. sources outside the horizon)
 
     @model_validator(mode="after")
     def _within_budget(self) -> "EvidenceBundle":

@@ -38,6 +38,7 @@ async def write_report(
 ) -> WriterOutput:
     parts = [f"Research brief:\n{brief}", "Evidence bundle:\n" + render_bundle(bundle.sections, bundle.sources)]
     notes = [f"- sub-task {r.sub_task_id} failed: {r.error or 'no usable sources'}" for r in failed]
+    notes += [f"- {n}" for n in bundle.notes]
     if bundle.cuts:
         n = sum(len(c.evidence_ids) for c in bundle.cuts)
         notes.append(f"- {n} lower-priority evidence item(s) were summarized or dropped to fit the evidence budget")

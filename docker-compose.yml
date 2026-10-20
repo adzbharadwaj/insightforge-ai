@@ -1,4 +1,7 @@
-# Local infrastructure. Backend, worker and frontend services are added in later phases.
+# Infrastructure starts by default (local development runs the app with uv / npm):
+#   docker compose up -d
+# The whole stack (API, run worker, scheduler, frontend) is behind the "app" profile:
+#   docker compose --profile app up -d --build
 services:
   postgres:
     image: postgres:16-alpine
@@ -33,6 +36,64 @@ services:
       timeout: 3s
       retries: 10
 
+  api:
+    profiles: [app]
+    build: &backend-build
+      context: .
+      dockerfile: backend/Dockerfile
+    image: insightforge-backend
+    env_file: .env
+    environment: &backend-env
+      DATABASE_URL: postgresql+asyncpg://insightforge:insightforge@postgres:5432/insightforge
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+    command: sh -c "alembic upgrade head && uvicorn insightforge.main:app --host 0.0.0.0 --port 8000"
+    ports: ["8000:8000"]
+    volumes: [app-data:/app/data]
+    depends_on: &infra
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    profiles: [app]
+    build: *backend-build
+    image: insightforge-backend
+    env_file: .env
+    environment: *backend-env
+    command: arq insightforge.worker.WorkerSettings
+    volumes: [app-data:/app/data]
+    depends_on:
+      <<: *infra
+      api: {condition: service_healthy}  # the API container applies migrations first
+
+  scheduler:
+    profiles: [app]
+    build: *backend-build
+    image: insightforge-backend
+    env_file: .env
+    environment: *backend-env
+    command: insightforge-scheduler
+    depends_on:
+      <<: *infra
+      api: {condition: service_healthy}
+
+  frontend:
+    profiles: [app]
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports: ["3000:3000"]
+    depends_on:
+      api: {condition: service_healthy}
+
 volumes:
   postgres-data:
   qdrant-data:
+  app-data:
