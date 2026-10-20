@@ -20,6 +20,14 @@ itself is in [docs/sample-report.md](docs/sample-report.md) ([PDF export](docs/s
 sample, Bolt.Earth vs its competitors in India's EV charging market, run through the UI:
 [Markdown](docs/sample-report-bolt-earth.md) · [PDF](docs/sample-report-bolt-earth.pdf).
 
+**Demo videos** (screen recordings of that Bolt.Earth run in the UI, 720p):
+
+| Video | Shows |
+|---|---|
+| [Research run and report](docs/demo/01-research-run-and-report.mp4) (6 min) | Brief submitted → Planner's sub-tasks → research, entity and synthesis activity log (time-horizon exclusions, evidence bundle 4,962/6,000 tokens) → complete in 3m 56s → report: contents, confidence badges, citations, Gaps & Limitations, fact-check 80% (8/10) with two amber `[UNVERIFIED]` claims |
+| [Share link](docs/demo/02-share-link.mp4) (25 s) | Copy a read-only share link (7-day expiry) and open it |
+| [PDF and Markdown export](docs/demo/03-pdf-and-markdown-export.mp4) (21 s) | Download the report as PDF and `.md` |
+
 ---
 
 ## Contents
@@ -370,7 +378,7 @@ backend/migrations/   Alembic
 frontend/src/         Next.js app (brief, run/[id], report/[id], share/[token], reports, watchlist)
 briefs/               sample brief library
 eval/                 results and report
-docs/                 architecture.html, sample reports (.md + .pdf)
+docs/                 architecture.html, sample reports (.md + .pdf), demo/ screen recordings
 ```
 
 ---
