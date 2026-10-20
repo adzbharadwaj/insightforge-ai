@@ -4,10 +4,14 @@ The PDF is rendered from the same Markdown the user sees, with the confidence la
 coloured badges and `[UNVERIFIED]` claims in amber. WeasyPrint is imported lazily: it needs
 the pango system library (`brew install pango` on macOS, `apt install libpango-1.0-0` on
 Debian); without it, PDF export reports itself unavailable instead of crashing the API.
+On macOS, Homebrew's lib directory is not on the library search path, so it is added before the import.
 """
 
 import html
+import os
 import re
+import sys
+from pathlib import Path
 
 from markdown_it import MarkdownIt
 
@@ -39,7 +43,17 @@ def report_html(markdown: str, title: str, meta: str = "") -> str:
             f"<style>{CSS}</style></head><body>{meta_html}{body}</body></html>")
 
 
+def _add_homebrew_libs() -> None:
+    """Let WeasyPrint find Homebrew's pango (find_library reads this variable at call time)."""
+    if sys.platform != "darwin":
+        return
+    dirs = [d for d in ("/opt/homebrew/lib", "/usr/local/lib") if Path(d).is_dir()]
+    current = [p for p in os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "").split(":") if p]
+    os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(current + [d for d in dirs if d not in current])
+
+
 def report_pdf(markdown: str, title: str, meta: str = "") -> bytes:
+    _add_homebrew_libs()
     try:
         from weasyprint import HTML
     except OSError as exc:

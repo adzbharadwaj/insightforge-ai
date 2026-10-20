@@ -16,7 +16,9 @@ plainly. Topics can be put on a watchlist and re-researched on a schedule, with 
 
 **Evaluation (1 live run, `ev-charging-eu`):** fact-check 6/7 (86%), citation accuracy 37/37 (100%), synthesis
 quality 3.8/5, must-cover topics 100%, 217k tokens, 218 s. Details in [eval/report.md](eval/report.md); the report
-itself is in [docs/sample-report.md](docs/sample-report.md).
+itself is in [docs/sample-report.md](docs/sample-report.md) ([PDF export](docs/sample-report.pdf)). A second
+sample, Bolt.Earth vs its competitors in India's EV charging market, run through the UI:
+[Markdown](docs/sample-report-bolt-earth.md) · [PDF](docs/sample-report-bolt-earth.pdf).
 
 ---
 
@@ -136,7 +138,8 @@ The API container applies migrations before starting; the UI is on http://localh
 The backend image (~5.4 GB, mostly Docling's CPU-only PyTorch) includes the system libraries for PDF export (pango)
 and Docling. Verified: all services start, the API is healthy, PDF export works in the container.
 
-**PDF export locally:** WeasyPrint needs pango (`brew install pango` on macOS). Without it,
+**PDF export locally:** WeasyPrint needs pango (`brew install pango` on macOS; the exporter adds Homebrew's
+lib directory to the library search path itself, so no shell setup is needed). Without pango,
 `/export?format=pdf` returns 501 with that hint; Markdown export always works.
 
 ---
@@ -367,7 +370,7 @@ backend/migrations/   Alembic
 frontend/src/         Next.js app (brief, run/[id], report/[id], share/[token], reports, watchlist)
 briefs/               sample brief library
 eval/                 results and report
-docs/                 architecture.html, sample-report.md
+docs/                 architecture.html, sample reports (.md + .pdf)
 ```
 
 ---
