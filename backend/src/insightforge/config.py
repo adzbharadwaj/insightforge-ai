@@ -4,10 +4,12 @@ Values come from environment variables (or a .env file). Defaults are the
 starting points from the architecture plan; tune them from eval results.
 """
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from dotenv import dotenv_values
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -135,4 +137,12 @@ def require_secret(value: SecretStr, name: str) -> str:
 
 @lru_cache
 def get_settings() -> Settings:
+    export_tracing_env()
     return Settings()
+
+
+def export_tracing_env() -> None:
+    """LangSmith reads the process environment, not our settings: copy LANGSMITH_* from .env (real env wins)."""
+    for key, value in dotenv_values(REPO_ROOT / ".env").items():
+        if key.startswith("LANGSMITH_") and value:
+            os.environ.setdefault(key, value)
