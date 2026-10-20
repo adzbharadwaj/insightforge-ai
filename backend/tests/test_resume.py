@@ -171,6 +171,20 @@ async def test_planning_errors_are_not_retryable(committed_run):
     assert outcome.status is RunStatus.FAILED and not outcome.retryable
 
 
+async def test_ui_source_prefs_run_and_bad_state_is_not_retryable(committed_run):
+    maker, user_id, run_id = committed_run
+    deps = deps_for(maker, run_id, lambda m: TaskGraph(sub_tasks=[spec(1)]))
+    prefs = {"web": True, "docs": False, "memory": True, "review_conflicts": False,
+             "blocked_domains": ["example.com"], "deprioritized_domains": []}  # what the API stores
+    outcome = await execute(build_pipeline(deps, InMemorySaver()), deps, run_id,
+                            initial(user_id, run_id, source_prefs=prefs))
+    assert outcome.status is RunStatus.COMPLETE
+
+    bad = await execute(build_pipeline(deps, InMemorySaver()), deps, run_id,
+                        initial(user_id, run_id, source_prefs={"web": {"nested": 1}}))
+    assert bad.status is RunStatus.FAILED and not bad.retryable
+
+
 async def test_rewrite_is_skipped_when_time_is_short(committed_run):
     from test_pipeline import lying_writer
 

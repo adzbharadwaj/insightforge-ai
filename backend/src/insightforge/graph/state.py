@@ -377,7 +377,9 @@ class PipelineState(BaseModel):
     run_id: uuid.UUID
     user_id: uuid.UUID
     brief: str
-    source_prefs: dict[str, bool] = Field(default_factory=lambda: {"web": True, "docs": True, "memory": True})
+    # source toggles (web/docs/memory/review_conflicts) plus blocked_domains / deprioritized_domains lists
+    source_prefs: dict[str, bool | list[str]] = Field(
+        default_factory=lambda: {"web": True, "docs": True, "memory": True})
     memory_summaries: list[str] = Field(default_factory=list)
     related_entities: list[str] = Field(default_factory=list)  # past-run entities (Qdrant `entities`)
     clarification_answer: str | None = None

@@ -25,6 +25,7 @@ from deepagents import SubAgent
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
+from pydantic import ValidationError
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -388,7 +389,10 @@ async def execute(
         return await _fail(deps, run_id, f"planning failed: {exc}")
     except Exception as exc:  # any other error (provider 4xx/5xx, bug) ends the run FAILED, never a crash
         logger.exception("run %s failed with an unexpected error", run_id)
-        return await _fail(deps, run_id, f"unexpected error: {type(exc).__name__}: {str(exc)[:500]}", retryable=True)
+        # invalid run state (e.g. malformed source prefs) fails the same way on every attempt: don't auto-resume
+        bad_state = isinstance(exc, ValidationError) and exc.title == PipelineState.__name__
+        return await _fail(deps, run_id, f"unexpected error: {type(exc).__name__}: {str(exc)[:500]}",
+                           retryable=not bad_state)
 
     if "__interrupt__" in state:
         value = state["__interrupt__"][0].value
