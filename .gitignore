@@ -1,0 +1,21 @@
+architecture-style-guide.md
+assignment_04_market_intelligence.md
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.next/
+
+# Local data
+data/

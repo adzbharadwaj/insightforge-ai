@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>InsightForge Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a blueprint sheet. One wide diagram in four layer bands, then the run lifecycle, then reference tables keyed by component number. */
+:root {
+  --bg: #f3f6f7;
+  --surface: #ffffff;
+  --band: #e8eef0;
+  --fg: #13222a;
+  --muted: #586a73;
+  --line: #c4d0d5;
+  --cyan: #0e7490;
+  --amber: #b45309;
+  --purple: #7c3aed;
+  --cyan-tint: #e3f2f6;
+  --amber-tint: #fcf1e3;
+  --purple-tint: #f2edfd;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1518; --surface: #142026; --band: #111c21; --fg: #e2ebee; --muted: #93a6ae; --line: #2d3e46;
+    --cyan: #22d3ee; --amber: #f5a524; --purple: #b495ff;
+    --cyan-tint: #0f2e36; --amber-tint: #33240e; --purple-tint: #231a3c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1518; --surface: #142026; --band: #111c21; --fg: #e2ebee; --muted: #93a6ae; --line: #2d3e46;
+  --cyan: #22d3ee; --amber: #f5a524; --purple: #b495ff;
+  --cyan-tint: #0f2e36; --amber-tint: #33240e; --purple-tint: #231a3c;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.55; }
+.page { max-width: 1480px; margin: 0 auto; padding-inline: 24px; padding-block: 40px 64px; display: grid; gap: 48px; }
+@media (max-width: 600px) { .page { padding-inline: 16px; padding-block: 24px 48px; gap: 36px; } }
+
+header { display: grid; gap: 14px; max-width: 72ch; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0; }
+h1 { font-family: var(--font-display); font-weight: 750; font-stretch: 115%; font-size: clamp(30px, 5vw, 48px); line-height: 1.05; margin: 0; text-wrap: balance; letter-spacing: -.01em; }
+.lede { margin: 0; color: var(--muted); font-size: 16px; max-width: 64ch; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; }
+.chips li { font-family: var(--font-mono); font-size: 12px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+
+h2 { font-family: var(--font-display); font-weight: 700; font-stretch: 108%; font-size: 22px; margin: 0; text-wrap: balance; }
+section { display: grid; gap: 16px; min-width: 0; }
+.sub { margin: 0; color: var(--muted); max-width: 70ch; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: center; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.legend svg { width: 40px; height: 10px; flex: none; }
+.legend code { font-family: var(--font-mono); color: var(--fg); }
+
+figure { margin: 0; display: grid; gap: 12px; min-width: 0; }
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.scroll svg { display: block; width: 100%; height: auto; }
+svg.main { min-width: 1120px; }
+svg.states { min-width: 920px; }
+figcaption { font-size: 14px; color: var(--muted); max-width: 80ch; }
+
+/* SVG styling (page stylesheet; nothing styled inside the SVGs) */
+.band { fill: var(--band); }
+.bl { font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; fill: var(--muted); }
+.box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+.box-ctrl { fill: var(--cyan-tint); stroke: var(--cyan); stroke-width: 1.6; }
+.box-safe { fill: var(--amber-tint); stroke: var(--amber); stroke-width: 1.4; }
+.box-store { fill: var(--surface); stroke: var(--purple); stroke-width: 1.2; }
+.box-done { fill: var(--surface); stroke: var(--cyan); stroke-width: 1.6; }
+.pool { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 2 3; }
+.tt { font-family: var(--font-body); font-size: 13px; font-weight: 600; fill: var(--fg); }
+.tt .num, .num { font-family: var(--font-mono); font-weight: 500; fill: var(--muted); }
+.tt .soft { font-weight: 400; fill: var(--muted); }
+.td { font-family: var(--font-mono); font-size: 11px; fill: var(--muted); }
+.ts { font-family: var(--font-mono); font-size: 12px; fill: var(--fg); }
+.cl { font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; fill: var(--muted); }
+.el { font-family: var(--font-mono); font-size: 10.5px; fill: var(--muted); }
+.ty { font-family: var(--font-mono); font-size: 10.5px; fill: var(--purple); }
+.sn { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; fill: var(--fg); }
+.e-req, .e-safe, .e-state { fill: none; stroke-width: 1.6; }
+.e-req { stroke: var(--cyan); }
+.e-safe { stroke: var(--amber); }
+.e-state { stroke: var(--purple); stroke-dasharray: 5 4; }
+.mk-req { fill: var(--cyan); }
+.mk-safe { fill: var(--amber); }
+.mk-state { fill: var(--purple); }
+
+/* Tables */
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { font-family: var(--font-mono); font-size: 11px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); background: var(--band); }
+td code, .mono { font-family: var(--font-mono); font-size: 12.5px; }
+td.num-col { font-variant-numeric: tabular-nums; white-space: nowrap; font-family: var(--font-mono); font-size: 13px; }
+.ref { font-family: var(--font-mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.never { color: var(--amber); }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 32px; }
+.two > section { min-width: 0; }
+footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+
+<div class="page">
+
+<header>
+  <p class="eyebrow">InsightForge AI · plan of record · Oct 2026</p>
+  <h1>InsightForge Architecture</h1>
+  <p class="lede">A research brief goes in and a cited intelligence report comes out. The control plane is designed first: one LangGraph orchestrator owns every stage and limit, every boundary has a guardrail, and every failure ends in a defined outcome.</p>
+  <ul class="chips">
+    <li>LLMs via OpenRouter</li>
+    <li>Embeddings: FastEmbed bge-small, local</li>
+    <li>LangGraph + deepagents</li>
+    <li>FastAPI · Next.js 14</li>
+    <li>Postgres · Redis · Qdrant</li>
+  </ul>
+</header>
+
+<section aria-labelledby="h-system">
+  <h2 id="h-system">System, in four layers</h2>
+  <div class="legend">
+    <span><svg viewBox="0 0 40 10" aria-hidden="true"><line x1="2" y1="5" x2="38" y2="5" class="e-req"/></svg>request / response</span>
+    <span><svg viewBox="0 0 40 10" aria-hidden="true"><line x1="2" y1="5" x2="38" y2="5" class="e-safe"/></svg>safety and human approval</span>
+    <span><svg viewBox="0 0 40 10" aria-hidden="true"><line x1="2" y1="5" x2="38" y2="5" class="e-state"/></svg>state and ingestion</span>
+    <span><code>03a–03d</code> one guardrail layer, reused at four boundaries</span>
+    <span><code>SubTask[]</code> typed state passed between agents</span>
+  </div>
+  <figure>
+    <div class="scroll">
+<svg class="main" viewBox="0 0 1420 1170" role="img" aria-label="InsightForge architecture in four layers. Requests pass input guardrails and a run queue to a LangGraph orchestrator. A planner deep agent spawns isolated researcher subagents that return only source IDs. Synthesis is the only agent that reads raw content from the scratch store. Writer output passes a grounding check, fact-checking and output guardrails before the user sees it. State lives in Postgres, a scratch store and Qdrant. Operations covers observability, evaluation, reliability, release and secure storage.">
+  <defs>
+    <marker id="ar-req" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-req"/></marker>
+    <marker id="ar-safe" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-safe"/></marker>
+    <marker id="ar-state" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-state"/></marker>
+  </defs>
+
+  <!-- Bands -->
+  <rect class="band" x="15" y="10" width="1390" height="205" rx="10"/>
+  <rect class="band" x="15" y="230" width="1390" height="460" rx="10"/>
+  <rect class="band" x="15" y="705" width="1390" height="270" rx="10"/>
+  <rect class="band" x="15" y="990" width="1390" height="165" rx="10"/>
+  <text class="bl" x="50" y="32">A · ONLINE REQUEST PATH</text>
+  <text class="bl" x="50" y="252">B · CONTROLLED EXECUTION</text>
+  <text class="bl" x="50" y="727">C · STATE + DATA FRESHNESS</text>
+  <text class="bl" x="50" y="1012">D · PRODUCTION OPERATIONS</text>
+
+  <!-- ===== A: online request path ===== -->
+  <rect class="box" x="50" y="78" width="170" height="78" rx="6"/>
+  <text class="tt" x="62" y="100"><tspan class="num">01</tspan> Next.js UI</text>
+  <text class="td" x="62" y="118">brief · uploads</text>
+  <text class="td" x="62" y="133">live progress · report</text>
+  <text class="td" x="62" y="148">watchlist · alerts</text>
+
+  <rect class="box" x="290" y="78" width="170" height="78" rx="6"/>
+  <text class="tt" x="302" y="100"><tspan class="num">02</tspan> FastAPI gateway</text>
+  <text class="td" x="302" y="118">JWT identity · user_id</text>
+  <text class="td" x="302" y="133">rate limit</text>
+  <text class="td" x="302" y="148">SSE progress</text>
+
+  <rect class="box-safe" x="530" y="78" width="170" height="78" rx="6"/>
+  <text class="tt" x="542" y="100"><tspan class="num">03a</tspan> Input guardrails</text>
+  <text class="td" x="542" y="118">500 chars · scope</text>
+  <text class="td" x="542" y="133">injection · policy</text>
+  <text class="td" x="542" y="148">PDF ≤ 10 × 20 MB</text>
+
+  <rect class="box" x="770" y="78" width="170" height="78" rx="6"/>
+  <text class="tt" x="782" y="100"><tspan class="num">04</tspan> Run queue</text>
+  <text class="td" x="782" y="118">Redis + arq</text>
+  <text class="td" x="782" y="133">concurrency cap</text>
+  <text class="td" x="782" y="148">manual + scheduled</text>
+
+  <rect class="box-safe" x="1210" y="78" width="170" height="78" rx="6"/>
+  <text class="tt" x="1222" y="100"><tspan class="num">03b</tspan> Output guardrails</text>
+  <text class="td" x="1222" y="118">grounding check</text>
+  <text class="td" x="1222" y="133">fact-check gate</text>
+  <text class="td" x="1222" y="148">PII + safety scan</text>
+
+  <line class="e-req" x1="220" y1="104" x2="290" y2="104" marker-end="url(#ar-req)"/>
+  <text class="el" x="255" y="97" text-anchor="middle">brief</text>
+  <line class="e-req" x1="290" y1="134" x2="220" y2="134" marker-end="url(#ar-req)"/>
+  <text class="el" x="255" y="149" text-anchor="middle">SSE</text>
+  <line class="e-req" x1="460" y1="104" x2="530" y2="104" marker-end="url(#ar-req)"/>
+  <text class="el" x="495" y="97" text-anchor="middle">user_id</text>
+  <line class="e-req" x1="700" y1="104" x2="770" y2="104" marker-end="url(#ar-req)"/>
+  <text class="el" x="735" y="97" text-anchor="middle">accepted</text>
+  <line class="e-req" x1="855" y1="156" x2="855" y2="265" marker-end="url(#ar-req)"/>
+  <text class="el" x="863" y="200">dequeue · cap 4</text>
+  <line class="e-req" x1="375" y1="265" x2="375" y2="156" marker-end="url(#ar-req)"/>
+  <text class="el" x="383" y="200">progress events only</text>
+  <line class="e-req" x1="1295" y1="265" x2="1295" y2="156" marker-end="url(#ar-req)"/>
+  <text class="el" x="1287" y="200" text-anchor="end">draft + claims + evidence</text>
+  <path class="e-req" d="M1295,78 V58 H135 V78" marker-end="url(#ar-req)"/>
+  <text class="el" x="715" y="52" text-anchor="middle">COMPLETE report only, after every check passes</text>
+
+  <!-- HITL lane: 15 ⇄ 01, plus resume into 05 -->
+  <path class="e-safe" d="M50,615 H30 V117 H50" marker-start="url(#ar-safe)" marker-end="url(#ar-safe)"/>
+  <line class="e-safe" x1="30" y1="307" x2="50" y2="307" marker-end="url(#ar-safe)"/>
+  <text class="el" x="44" y="560" transform="rotate(-90 44 560)">question ⇄ answer</text>
+
+  <!-- ===== B: controlled execution ===== -->
+  <rect class="box-ctrl" x="50" y="265" width="1330" height="85" rx="8"/>
+  <text class="tt" x="70" y="289"><tspan class="num">05</tspan> LangGraph orchestrator<tspan class="soft"> · control plane, typed state on every edge</tspan></text>
+  <text class="ts" x="70" y="313">PLANNING → CLARIFY? → RESEARCHING → SYNTHESIZING → WRITING ⇄ GROUNDING → FACT_CHECKING → COMPLETE | FAILED</text>
+  <text class="td" x="70" y="335">limits: ≤ 6 sub-tasks · 12 tool calls per subagent · 8 min per run · 250k tokens per run · 2 writer retries · checkpointed in 16</text>
+
+  <line class="e-req" x1="125" y1="350" x2="125" y2="420" marker-end="url(#ar-req)"/>
+  <text class="el" x="133" y="390">runs node</text>
+  <line class="e-req" x1="875" y1="350" x2="875" y2="420" marker-end="url(#ar-req)"/>
+  <line class="e-req" x1="1085" y1="350" x2="1085" y2="420" marker-end="url(#ar-req)"/>
+  <line class="e-req" x1="1295" y1="350" x2="1295" y2="420" marker-end="url(#ar-req)"/>
+
+  <rect class="box" x="50" y="420" width="150" height="78" rx="6"/>
+  <text class="tt" x="62" y="442"><tspan class="num">06</tspan> Planner</text>
+  <text class="td" x="62" y="460">create_deep_agent</text>
+  <text class="td" x="62" y="475">write_todos · ≤ 6</text>
+  <text class="td" x="62" y="490">reads 3 summaries</text>
+
+  <rect class="pool" x="260" y="396" width="480" height="114" rx="8"/>
+  <text class="cl" x="272" y="411">RESEARCHER POOL · ISOLATED CONTEXT PER SUBAGENT</text>
+
+  <rect class="box" x="275" y="420" width="140" height="78" rx="6"/>
+  <text class="tt" x="287" y="442"><tspan class="num">07</tspan> Web Search</text>
+  <text class="td" x="287" y="460">top 5 full bodies</text>
+  <text class="td" x="287" y="475">credibility score</text>
+  <text class="td" x="287" y="490">skips paywalls</text>
+
+  <rect class="box" x="430" y="420" width="140" height="78" rx="6"/>
+  <text class="tt" x="442" y="442"><tspan class="num">08</tspan> Doc Reader</text>
+  <text class="td" x="442" y="460">Qdrant top-k = 8</text>
+  <text class="td" x="442" y="475">per sub-task query</text>
+  <text class="td" x="442" y="490">returns chunk IDs</text>
+
+  <rect class="box" x="585" y="420" width="140" height="78" rx="6"/>
+  <text class="tt" x="597" y="442"><tspan class="num">09</tspan> Entity Extractor</text>
+  <text class="td" x="597" y="460">2nd wave · IDs in</text>
+  <text class="td" x="597" y="475">entity graph JSON</text>
+  <text class="td" x="597" y="490">conflict: true</text>
+
+  <rect class="box" x="800" y="420" width="150" height="78" rx="6"/>
+  <text class="tt" x="812" y="442"><tspan class="num">10</tspan> Synthesis</text>
+  <text class="td" x="812" y="460">only raw reader</text>
+  <text class="td" x="812" y="475">dedupe · confidence</text>
+  <text class="td" x="812" y="490">compress to 6k</text>
+
+  <rect class="box" x="1010" y="420" width="150" height="78" rx="6"/>
+  <text class="tt" x="1022" y="442"><tspan class="num">11</tspan> Writer</text>
+  <text class="td" x="1022" y="460">Markdown report</text>
+  <text class="td" x="1022" y="475">claim → evidence</text>
+  <text class="td" x="1022" y="490">retry ≤ 2</text>
+
+  <rect class="box" x="1220" y="420" width="150" height="78" rx="6"/>
+  <text class="tt" x="1232" y="442"><tspan class="num">12</tspan> Fact-Checker</text>
+  <text class="td" x="1232" y="460">20% sample, min 5</text>
+  <text class="td" x="1232" y="475">cosine ≥ 0.85</text>
+  <text class="td" x="1232" y="490">fail → [UNVERIFIED]</text>
+
+  <line class="e-req" x1="200" y1="459" x2="260" y2="459" marker-end="url(#ar-req)"/>
+  <text class="el" x="230" y="452" text-anchor="middle">task</text>
+  <line class="e-req" x1="740" y1="459" x2="800" y2="459" marker-end="url(#ar-req)"/>
+  <text class="el" x="770" y="452" text-anchor="middle">refs</text>
+  <line class="e-req" x1="950" y1="459" x2="1010" y2="459" marker-end="url(#ar-req)"/>
+  <text class="el" x="980" y="452" text-anchor="middle">bundle</text>
+  <line class="e-req" x1="1160" y1="459" x2="1220" y2="459" marker-end="url(#ar-req)"/>
+  <text class="el" x="1190" y="452" text-anchor="middle">draft</text>
+
+  <text class="ty" x="230" y="530" text-anchor="middle">SubTask[]</text>
+  <text class="ty" x="230" y="544" text-anchor="middle">≤ 6 items</text>
+  <text class="ty" x="770" y="530" text-anchor="middle">SourceRef[]</text>
+  <text class="ty" x="770" y="544" text-anchor="middle">IDs only</text>
+  <text class="ty" x="980" y="530" text-anchor="middle">EvidenceBundle</text>
+  <text class="ty" x="980" y="544" text-anchor="middle">≤ 6,000 tokens</text>
+  <text class="ty" x="1190" y="530" text-anchor="middle">Draft + claims</text>
+  <text class="ty" x="1190" y="544" text-anchor="middle">→ evidence_ids</text>
+
+  <line class="e-safe" x1="125" y1="498" x2="125" y2="575" marker-end="url(#ar-safe)"/>
+  <text class="el" x="133" y="566">vague brief</text>
+  <line class="e-req" x1="500" y1="510" x2="500" y2="575" marker-end="url(#ar-req)"/>
+  <text class="el" x="508" y="566">typed tool calls</text>
+  <line class="e-req" x1="1085" y1="498" x2="1085" y2="575" marker-end="url(#ar-req)"/>
+  <text class="el" x="1093" y="566">every LLM call</text>
+  <line class="e-state" x1="915" y1="745" x2="915" y2="498" marker-end="url(#ar-state)"/>
+  <text class="el" x="923" y="566">resolve IDs → raw</text>
+
+  <rect class="box-safe" x="50" y="575" width="250" height="80" rx="6"/>
+  <text class="tt" x="62" y="597"><tspan class="num">15</tspan> Human-in-the-loop</text>
+  <text class="td" x="62" y="615">1 clarifying question in UI</text>
+  <text class="td" x="62" y="630">answer → resumes graph</text>
+  <text class="td" x="62" y="645">no answer in 30 min → CANCELLED</text>
+
+  <rect class="box" x="350" y="575" width="290" height="80" rx="6"/>
+  <text class="tt" x="362" y="597"><tspan class="num">14</tspan> Typed tools</text>
+  <text class="td" x="362" y="615">search: Tavily | Brave | SerpAPI</text>
+  <text class="td" x="362" y="630">fetch top 5 · skip 402 / login</text>
+  <text class="td" x="362" y="645">read_source(id) · Qdrant k = 8</text>
+
+  <line class="e-req" x1="640" y1="615" x2="690" y2="615" marker-end="url(#ar-req)"/>
+  <text class="el" x="665" y="607" text-anchor="middle">raw</text>
+
+  <rect class="box-safe" x="690" y="575" width="190" height="80" rx="6"/>
+  <text class="tt" x="702" y="597"><tspan class="num">03c</tspan> Untrusted content</text>
+  <text class="td" x="702" y="615">sanitize HTML / PDF</text>
+  <text class="td" x="702" y="630">tag as data only</text>
+  <text class="td" x="702" y="645">06 never sees it</text>
+
+  <rect class="box" x="960" y="575" width="420" height="80" rx="6"/>
+  <text class="tt" x="972" y="597"><tspan class="num">13</tspan> Model gateway<tspan class="soft"> · OpenRouter API</tspan></text>
+  <text class="td" x="972" y="615">role → model via env · timeout · retries</text>
+  <text class="td" x="972" y="630">fallback model · max_tokens per role</text>
+  <text class="td" x="972" y="645">token + cost meter per run → 250k cap</text>
+
+  <line class="e-state" x1="785" y1="655" x2="785" y2="745" marker-end="url(#ar-state)"/>
+  <text class="el" x="793" y="700">writes source</text>
+
+  <!-- ===== C: state + data freshness ===== -->
+  <rect class="box-store" x="50" y="745" width="250" height="80" rx="6"/>
+  <text class="tt" x="62" y="767"><tspan class="num">19</tspan> PDF ingestion</text>
+  <text class="td" x="62" y="785">Docling → semantic sections</text>
+  <text class="td" x="62" y="800">FastEmbed bge-small, 384-d</text>
+  <text class="td" x="62" y="815">writes 18 doc_chunks</text>
+
+  <rect class="box-store" x="350" y="745" width="270" height="80" rx="6"/>
+  <text class="tt" x="362" y="767"><tspan class="num">16</tspan> Postgres</text>
+  <text class="td" x="362" y="785">runs · task graph · run log</text>
+  <text class="td" x="362" y="800">reports · claims · alerts</text>
+  <text class="td" x="362" y="815">watchlist · LangGraph checkpoints</text>
+
+  <rect class="box-store" x="650" y="745" width="280" height="80" rx="6"/>
+  <text class="tt" x="662" y="767"><tspan class="num">17</tspan> Scratch store</text>
+  <text class="td" x="662" y="785">scratch_sources, keyed by source_id</text>
+  <text class="td" x="662" y="800">url · date · body · credibility</text>
+  <text class="td" x="662" y="815">read via read_source(id)</text>
+
+  <rect class="box-store" x="980" y="745" width="400" height="80" rx="6"/>
+  <text class="tt" x="992" y="767"><tspan class="num">18</tspan> Qdrant<tspan class="soft"> · every query filtered by user_id</tspan></text>
+  <text class="td" x="992" y="785">doc_chunks · entities</text>
+  <text class="td" x="992" y="800">report_summaries: last 3 → 06</text>
+  <text class="td" x="992" y="815">factcheck_{run_id}: deleted after run</text>
+
+  <line class="e-state" x1="485" y1="880" x2="485" y2="825" marker-start="url(#ar-state)" marker-end="url(#ar-state)"/>
+  <text class="el" x="493" y="857">previous + new report</text>
+
+  <rect class="box" x="50" y="880" width="250" height="78" rx="6"/>
+  <text class="tt" x="62" y="902"><tspan class="num">20</tspan> Scheduler worker</text>
+  <text class="td" x="62" y="920">APScheduler · Postgres job store</text>
+  <text class="td" x="62" y="935">daily / weekly → enqueue on 04</text>
+  <text class="td" x="62" y="950">one run per item at a time</text>
+
+  <line class="e-req" x1="300" y1="919" x2="350" y2="919" marker-end="url(#ar-req)"/>
+  <text class="el" x="325" y="912" text-anchor="middle">done</text>
+
+  <rect class="box" x="350" y="880" width="270" height="78" rx="6"/>
+  <text class="tt" x="362" y="902"><tspan class="num">21</tspan> Diff Agent</text>
+  <text class="td" x="362" y="920">new vs previous claims</text>
+  <text class="td" x="362" y="935">material changes only</text>
+  <text class="td" x="362" y="950">added · removed · changed</text>
+
+  <line class="e-req" x1="620" y1="919" x2="650" y2="919" marker-end="url(#ar-req)"/>
+
+  <rect class="box-safe" x="650" y="880" width="280" height="78" rx="6"/>
+  <text class="tt" x="662" y="902"><tspan class="num">03d</tspan> Webhook guard</text>
+  <text class="td" x="662" y="920">HTTPS only · SSRF block</text>
+  <text class="td" x="662" y="935">signed payload · 3 retries</text>
+  <text class="td" x="662" y="950">failure → in-app alert only</text>
+
+  <line class="e-req" x1="930" y1="919" x2="980" y2="919" marker-end="url(#ar-req)"/>
+  <text class="el" x="955" y="912" text-anchor="middle">POST</text>
+  <text class="tt" x="992" y="914">Slack incoming webhook</text>
+  <text class="td" x="992" y="932">and an alert row → 01 alert feed</text>
+
+  <!-- ===== D: production operations ===== -->
+  <rect class="box" x="50" y="1030" width="250" height="90" rx="6"/>
+  <text class="tt" x="62" y="1052"><tspan class="num">D1</tspan> Observability</text>
+  <text class="td" x="62" y="1071">LangSmith trace per run</text>
+  <text class="td" x="62" y="1087">tokens · cost · p95 latency</text>
+  <text class="td" x="62" y="1103">alerts on budget + errors</text>
+
+  <rect class="box" x="320" y="1030" width="250" height="90" rx="6"/>
+  <text class="tt" x="332" y="1052"><tspan class="num">D2</tspan> Evaluation</text>
+  <text class="td" x="332" y="1071">5 sample briefs = golden set</text>
+  <text class="td" x="332" y="1087">pass ≥ 80% · citation accuracy</text>
+  <text class="td" x="332" y="1103">tunes 03 rules, 05 limits, rubric</text>
+
+  <rect class="box" x="590" y="1030" width="250" height="90" rx="6"/>
+  <text class="tt" x="602" y="1052"><tspan class="num">D3</tspan> Reliability</text>
+  <text class="td" x="602" y="1071">concurrency caps on 04</text>
+  <text class="td" x="602" y="1087">per-domain fetch rate limits</text>
+  <text class="td" x="602" y="1103">circuit breaker · backoff</text>
+
+  <rect class="box" x="860" y="1030" width="250" height="90" rx="6"/>
+  <text class="tt" x="872" y="1052"><tspan class="num">D4</tspan> Release + recovery</text>
+  <text class="td" x="872" y="1071">docker compose · Alembic</text>
+  <text class="td" x="872" y="1087">load test · canary flag</text>
+  <text class="td" x="872" y="1103">Postgres + Qdrant backups</text>
+
+  <rect class="box" x="1130" y="1030" width="250" height="90" rx="6"/>
+  <text class="tt" x="1142" y="1052"><tspan class="num">D5</tspan> Secure storage</text>
+  <text class="td" x="1142" y="1071">secrets in env, never code</text>
+  <text class="td" x="1142" y="1087">share links: JWT, 7 days</text>
+  <text class="td" x="1142" y="1103">upload retention · audit log</text>
+</svg>
+    </div>
+    <figcaption>Nothing reaches the user's screen without passing 03b. Researchers hand back IDs, never text, and only 10 Synthesis reads raw content from 17. Scheduled watchlist runs enter through the same queue (04) and pipeline as manual briefs. Component numbers are used again in the tables below.</figcaption>
+  </figure>
+</section>
+
+<section aria-labelledby="h-run">
+  <h2 id="h-run">Run lifecycle</h2>
+  <figure>
+    <div class="scroll">
+<svg class="states" viewBox="0 0 1180 275" role="img" aria-label="Run state machine. PLANNING, RESEARCHING, SYNTHESIZING, WRITING, GROUNDING, FACT_CHECKING, COMPLETE. A vague brief goes to CLARIFY, whose answer returns to PLANNING, or which times out to CANCELLED after 30 minutes. GROUNDING sends an ungrounded draft back to WRITING up to two times. Any stage that exceeds the time or token budget ends in FAILED.">
+  <defs>
+    <marker id="sm-req" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-req"/></marker>
+    <marker id="sm-safe" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk-safe"/></marker>
+  </defs>
+
+  <rect class="box-safe" x="110" y="30" width="130" height="44" rx="22"/>
+  <text class="sn" x="175" y="56" text-anchor="middle">CLARIFY</text>
+  <rect class="box-safe" x="300" y="30" width="130" height="44" rx="22"/>
+  <text class="sn" x="365" y="56" text-anchor="middle">CANCELLED</text>
+
+  <rect class="box" x="20" y="130" width="130" height="44" rx="22"/>
+  <text class="sn" x="85" y="156" text-anchor="middle">PLANNING</text>
+  <rect class="box" x="185" y="130" width="130" height="44" rx="22"/>
+  <text class="sn" x="250" y="156" text-anchor="middle">RESEARCHING</text>
+  <rect class="box" x="350" y="130" width="130" height="44" rx="22"/>
+  <text class="sn" x="415" y="156" text-anchor="middle">SYNTHESIZING</text>
+  <rect class="box" x="515" y="130" width="130" height="44" rx="22"/>
+  <text class="sn" x="580" y="156" text-anchor="middle">WRITING</text>
+  <rect class="box" x="680" y="130" width="130" height="44" rx="22"/>
+  <text class="sn" x="745" y="156" text-anchor="middle">GROUNDING</text>
+  <rect class="box" x="845" y="130" width="130" height="44" rx="22"/>
+  <text class="sn" x="910" y="156" text-anchor="middle">FACT_CHECKING</text>
+  <rect class="box-done" x="1010" y="130" width="130" height="44" rx="22"/>
+  <text class="sn" x="1075" y="156" text-anchor="middle">COMPLETE</text>
+
+  <rect class="box-safe" x="515" y="222" width="130" height="44" rx="22"/>
+  <text class="sn" x="580" y="248" text-anchor="middle">FAILED</text>
+
+  <line class="e-req" x1="150" y1="152" x2="185" y2="152" marker-end="url(#sm-req)"/>
+  <line class="e-req" x1="315" y1="152" x2="350" y2="152" marker-end="url(#sm-req)"/>
+  <line class="e-req" x1="480" y1="152" x2="515" y2="152" marker-end="url(#sm-req)"/>
+  <line class="e-req" x1="645" y1="152" x2="680" y2="152" marker-end="url(#sm-req)"/>
+  <line class="e-req" x1="810" y1="152" x2="845" y2="152" marker-end="url(#sm-req)"/>
+  <line class="e-req" x1="975" y1="152" x2="1010" y2="152" marker-end="url(#sm-req)"/>
+
+  <path class="e-safe" d="M70,130 V52 H110" marker-end="url(#sm-safe)"/>
+  <text class="el" x="76" y="100">vague</text>
+  <line class="e-safe" x1="140" y1="74" x2="140" y2="130" marker-end="url(#sm-safe)"/>
+  <text class="el" x="146" y="106">answer</text>
+  <line class="e-safe" x1="240" y1="52" x2="300" y2="52" marker-end="url(#sm-safe)"/>
+  <text class="el" x="270" y="45" text-anchor="middle">30 min</text>
+
+  <path class="e-safe" d="M745,130 V100 H580 V130" marker-end="url(#sm-safe)"/>
+  <text class="el" x="662" y="92" text-anchor="middle">ungrounded · retry ≤ 2</text>
+
+  <line class="e-safe" x1="250" y1="174" x2="250" y2="200"/>
+  <line class="e-safe" x1="415" y1="174" x2="415" y2="200"/>
+  <line class="e-safe" x1="580" y1="174" x2="580" y2="200"/>
+  <line class="e-safe" x1="745" y1="174" x2="745" y2="200"/>
+  <line class="e-safe" x1="910" y1="174" x2="910" y2="200"/>
+  <line class="e-safe" x1="250" y1="200" x2="910" y2="200"/>
+  <line class="e-safe" x1="580" y1="200" x2="580" y2="222" marker-end="url(#sm-safe)"/>
+  <text class="el" x="572" y="216" text-anchor="end">time or token budget exceeded</text>
+  <text class="el" x="655" y="248">clear message to the user · run log kept</text>
+</svg>
+    </div>
+    <figcaption>Typed state moves left to right. Amber edges are the safety and human exits: one clarifying question, a bounded writer retry, and a budget breach that ends in FAILED with a message instead of hanging. After two failed retries, unsupported claims are dropped and listed under Gaps &amp; limitations.</figcaption>
+  </figure>
+</section>
+
+<section aria-labelledby="h-context">
+  <h2 id="h-context">What each agent sees</h2>
+  <p class="sub">Context isolation is graded, so it is written down per agent. Raw text lives in 17 and 18 and is read only where the job is compression or verification.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Agent</th><th>In its prompt</th><th>Hands back</th><th>Never sees</th></tr></thead>
+      <tbody>
+        <tr><td><span class="ref">06</span> Planner</td><td>Brief, last 3 compressed summaries from 18, sub-task schema</td><td><code>SubTask[]</code>, at most 6</td><td class="never">Raw source text</td></tr>
+        <tr><td><span class="ref">07 08</span> Web Search, Doc Reader</td><td>Its own sub-task: query, scope, time horizon, plus tool definitions</td><td><code>SourceRef[]</code>: source or chunk IDs with a one-line summary</td><td class="never">Full brief, sibling output</td></tr>
+        <tr><td><span class="ref">09</span> Entity Extractor</td><td>Source IDs; reads text on demand through <code>read_source</code></td><td>Entity graph JSON with <code>conflict: true</code> flags</td><td class="never">Full brief</td></tr>
+        <tr><td><span class="ref">10</span> Synthesis</td><td>Brief and the reference list; resolves raw text from 17 and 18</td><td><code>EvidenceBundle</code> ≤ 6,000 tokens, plus a log of what was cut and why</td><td>Nothing hidden: the one raw reader</td></tr>
+        <tr><td><span class="ref">11</span> Writer</td><td><code>EvidenceBundle</code> and the section plan from the task graph</td><td>Markdown plus <code>claims[] → evidence_ids</code></td><td class="never">Raw sources</td></tr>
+        <tr><td><span class="ref">12</span> Fact-Checker</td><td>Sampled claims and their source URLs</td><td><code>FactCheckSummary</code></td><td class="never">The rest of the report</td></tr>
+        <tr><td><span class="ref">21</span> Diff Agent</td><td>Previous and new claim sets for one topic</td><td>Added, removed and changed findings</td><td class="never">Raw sources</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="two">
+  <section aria-labelledby="h-limits">
+    <h2 id="h-limits">Limits</h2>
+    <p class="sub">Starting values in <span class="mono">config.py</span>, tuned from D2 results.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Limit</th><th>Value</th><th>Enforced by</th></tr></thead>
+        <tbody>
+          <tr><td>Sub-tasks per run</td><td class="num-col">6</td><td>06 output schema, 05</td></tr>
+          <tr><td>Tool calls per subagent</td><td class="num-col">12</td><td>deepagents recursion limit</td></tr>
+          <tr><td>Run wall clock</td><td class="num-col">8 min</td><td>05 deadline → FAILED</td></tr>
+          <tr><td>Tokens per run</td><td class="num-col">250,000</td><td>13 meter → FAILED</td></tr>
+          <tr><td>Evidence bundle</td><td class="num-col">6,000 tokens</td><td>10 compressor</td></tr>
+          <tr><td>Writer retries</td><td class="num-col">2</td><td>05 edge counter</td></tr>
+          <tr><td>Concurrent runs</td><td class="num-col">4</td><td>04 queue</td></tr>
+          <tr><td>Clarification wait</td><td class="num-col">30 min</td><td>15 → CANCELLED</td></tr>
+          <tr><td>Fact-check threshold</td><td class="num-col">cosine 0.85</td><td>12 via 18</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-fail">
+    <h2 id="h-fail">Failure outcomes</h2>
+    <p class="sub">Every failure path ends in a fallback, a safe message or a person.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>When</th><th>Then</th></tr></thead>
+        <tbody>
+          <tr><td>Primary model slow or down</td><td>13 switches to the fallback model</td></tr>
+          <tr><td>Search provider failing</td><td>Circuit breaker opens; sub-task marked Failed and listed in Gaps</td></tr>
+          <tr><td>Paywall or login wall</td><td>URL skipped and recorded in the run log</td></tr>
+          <tr><td>Writer cites missing evidence</td><td>Retry with an explicit constraint, twice at most, then drop the claim to Gaps</td></tr>
+          <tr><td>Source unreachable at fact-check</td><td>Claim marked <code>[UNVERIFIED]</code></td></tr>
+          <tr><td>Time or token budget exceeded</td><td>Run ends FAILED with a clear message; log kept</td></tr>
+          <tr><td>No answer to clarifying question</td><td>Run CANCELLED after 30 min; user notified</td></tr>
+          <tr><td>Webhook delivery fails</td><td>3 retries, then the alert stays in-app</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<section aria-labelledby="h-gaps">
+  <h2 id="h-gaps">Style-guide blind spots, closed</h2>
+  <p class="sub">The five gaps the style guide says tend to stay implicit, and where each is handled here.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Gap</th><th>Handled by</th></tr></thead>
+      <tbody>
+        <tr><td>Indirect prompt injection</td><td>03c sanitizes all fetched pages and PDFs and tags them as data. Researchers have no write tools, and 06 never sees raw text.</td></tr>
+        <tr><td>Evidence travelling with the draft</td><td>11 emits <code>claims[] → evidence_ids</code>; 03b and 12 check claims against exactly that evidence.</td></tr>
+        <tr><td>HITL return path and waiting state</td><td>15: the UI shows the question while the run waits as <code>AWAITING_CLARIFICATION</code>. The answer resumes the graph through a LangGraph interrupt; 30 min without an answer cancels the run.</td></tr>
+        <tr><td>Session store wiring</td><td>LangGraph checkpoints live in 16; 06 reads the last 3 summaries from 18 at startup.</td></tr>
+        <tr><td>Closing the eval loop</td><td>D2 results tune the credibility rubric, 05 limits and 03 guardrail rules after each eval cycle.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>Built from assignment_04_market_intelligence.md and architecture-style-guide.md. InsightForge AI is a fictional product built for learning purposes.</footer>
+
+</div>
+
+</body>
+</html>
