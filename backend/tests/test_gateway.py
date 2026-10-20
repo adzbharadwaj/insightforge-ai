@@ -37,10 +37,27 @@ def test_chat_model_is_configured_for_openrouter():
 
 
 def test_reasoning_is_bounded_for_narrow_roles_only():
-    gw = ModelGateway(_settings())
+    gw = ModelGateway(_settings())  # Claude
     assert gw.chat_model(Role.GROUNDING).extra_body == {"reasoning": {"effort": "low"}}
     assert gw.fallback_model(Role.GROUNDING).extra_body == {"reasoning": {"effort": "low"}}  # Sonnet accepts "low"
     assert gw.chat_model(Role.WRITER).extra_body is None  # judgment-heavy: provider default
+
+
+def test_open_models_route_only_to_hosts_that_honour_every_parameter():
+    gw = ModelGateway(_settings(model_primary="deepseek/deepseek-v4.1-flash", model_secondary="z-ai/glm-5.3-flash"))
+    route = {"require_parameters": True}
+    assert gw.chat_model(Role.GROUNDING).extra_body == {"provider": route, "reasoning": {"effort": "low"}}
+    assert gw.chat_model(Role.WRITER).extra_body == {"provider": route}
+    # Claude never gets the filter: with zero-data-retention settings it leaves no Claude host (live 404).
+    assert "provider" not in (ModelGateway(_settings()).chat_model(Role.WRITER).extra_body or {})
+
+
+def test_agent_output_strategy_follows_the_model():
+    assert ModelGateway(_settings()).agent_output_strategy(Role.RESEARCHER) == "provider"  # Claude rejects forced tool_choice
+    open_models = _settings(model_primary="deepseek/deepseek-v4.1-flash", model_secondary="z-ai/glm-5.3-flash")
+    assert ModelGateway(open_models).agent_output_strategy(Role.RESEARCHER) == "tool"
+    forced = _settings(agent_output_strategy="provider")
+    assert ModelGateway(forced).agent_output_strategy(Role.RESEARCHER) == "provider"
 
 
 def test_roles_map_to_tiers_and_fallback_flips_tier():

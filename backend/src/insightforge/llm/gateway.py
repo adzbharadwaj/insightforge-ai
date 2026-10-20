@@ -147,8 +147,27 @@ class ModelGateway:
             default_headers={"HTTP-Referer": s.openrouter_app_url, "X-Title": s.openrouter_app_name},
             callbacks=[self.meter] if self.meter else None,
             metadata={"role": role.value},
-            extra_body={"reasoning": {"effort": spec.reasoning_effort}} if spec.reasoning_effort else None,
+            extra_body=self._extra_body(spec, self.model_name(tier or spec.tier)),
         )
+
+    @staticmethod
+    def _extra_body(spec: RoleSpec, model: str) -> dict | None:
+        body: dict = {}
+        if not model.startswith("anthropic/"):
+            # Open models are served by many hosts, some of which silently ignore response_format; only route
+            # to hosts that honour every parameter. Not for Claude: with zero-data-retention account settings
+            # the remaining Claude hosts don't declare every parameter, and the filter leaves none (404).
+            body["provider"] = {"require_parameters": True}
+        if spec.reasoning_effort:
+            body["reasoning"] = {"effort": spec.reasoning_effort}
+        return body or None
+
+    def agent_output_strategy(self, role: Role) -> str:
+        """"provider" or "tool" for an agent with tools in this role (see Settings.agent_output_strategy)."""
+        mode = self.settings.agent_output_strategy
+        if mode != "auto":
+            return mode
+        return "provider" if self.model_name(ROLE_SPECS[role].tier).startswith("anthropic/") else "tool"
 
     def fallback_model(self, role: Role) -> BaseChatModel:
         spec = ROLE_SPECS[role]

@@ -27,7 +27,7 @@ from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from pydantic import ValidationError
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from insightforge.agents.prompts import render_subtask_prompt
@@ -104,6 +104,26 @@ class ResearchRecorder:
 
     # --- recording ----------------------------------------------------------------
 
+    async def load_checkpoints(self) -> list[str]:
+        """Restore sub-tasks a previous attempt already finished (status Done, result saved).
+
+        Failed or unfinished sub-tasks are not restored: a resumed research stage gives them another try.
+        """
+        async with self._sessionmaker() as session:
+            rows = (await session.scalars(select(SubTask).where(
+                SubTask.run_id == self.resolver.run_id, SubTask.status == SubTaskStatus.DONE,
+                SubTask.result.is_not(None)))).all()
+        restored = []
+        for row in rows:
+            if row.task_key in self.specs:
+                self.results[row.task_key] = ResearchResult.model_validate(row.result)
+                self.started.add(row.task_key)
+                restored.append(row.task_key)
+        return sorted(restored)
+
+    def pending(self) -> list[SubTaskSpec]:
+        return [spec for task_id, spec in self.specs.items() if task_id not in self.results]
+
     async def _set_status(self, sub_task_id: str, **values: Any) -> None:
         async with self._sessionmaker() as session:
             await session.execute(
@@ -139,6 +159,8 @@ class ResearchRecorder:
             status=result.status,
             summary=f"{len(refs)} source(s)",
             error=result.error,
+            # Checkpoint: only a Done result is saved, so a resume skips it and retries the rest.
+            result=result.model_dump(mode="json") if result.status is SubTaskStatus.DONE else None,
             finished_at=datetime.now(UTC),
         )
         await self.log.progress(result.sub_task_id, f"{result.sub_task_id}: {result.status.value}",

@@ -394,4 +394,5 @@ class PipelineState(BaseModel):
     final_markdown: str | None = None
     report_id: uuid.UUID | None = None
     stage_tokens: Annotated[dict[str, int], _merge] = Field(default_factory=dict)
+    stage_seconds: Annotated[dict[str, float], _merge] = Field(default_factory=dict)
     error: str | None = None

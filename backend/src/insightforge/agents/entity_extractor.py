@@ -19,6 +19,8 @@ import math
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from insightforge.agents.planner import build_delegating_agent, delegation_message
 from insightforge.agents.prompts import ENTITY_EXTRACTOR_PROMPT, EXTRACTION_PROMPT, render_entity_prompt
@@ -26,7 +28,7 @@ from insightforge.agents.subagent import isolated_subagent
 from insightforge.graph.state import BatchExtraction, EntityExtractionResult, EntityGraph, SourceExtraction
 from insightforge.guardrails.untrusted import wrap
 from insightforge.llm.gateway import ModelGateway, Role, TokenBudgetExceeded
-from insightforge.store.models import SubTaskStatus
+from insightforge.store.models import EntityExtractionRow, SubTaskStatus
 from insightforge.store.run_log import RunLog
 from insightforge.store.sources import ResolvedSource, SourceResolver
 from insightforge.tools.entities import merge_extractions
@@ -89,14 +91,17 @@ class EntityExtraction:
                 await self.log.emit(AGENT, "error", f"extraction failed for {len(group)} source(s)",
                                     error=f"{type(result).__name__}: {result}"[:300])
                 continue
+            done_now = []
             for source in group:
                 ext = result.get(source.source_id)
                 if ext is None:  # the model skipped this source in its answer
                     failed.append(source.source_id)
                     continue
                 self.collected[source.source_id] = (source, ext)
+                done_now.append((source.source_id, ext))
                 entities += len(ext.entities)
                 facts += len(ext.facts)
+            await self._save(done_now)  # checkpoint per batch: a resume never re-extracts these
 
         processed = len(sources) - (len(failed) - len(missing))
         parts = [f"Processed {processed} source(s): {entities} entities, {facts} facts."]
@@ -110,6 +115,27 @@ class EntityExtraction:
                                        f"{len(done)} already done, {len(foreign)} not assigned",
                                 failed=failed, foreign=foreign[:20])
         return " ".join(parts)
+
+    async def load_checkpoints(self) -> int:
+        """Restore extractions a previous attempt already saved, so a resumed wave skips those sources."""
+        async with self.log.sessionmaker() as session:
+            rows = (await session.scalars(select(EntityExtractionRow).where(
+                EntityExtractionRow.run_id == self.log.run_id,
+                EntityExtractionRow.source_id.in_(self.assigned)))).all()
+        saved = {r.source_id: SourceExtraction.model_validate(r.extraction) for r in rows}
+        for source in await self.resolver.resolve_many(list(saved)):
+            self.collected[source.source_id] = (source, saved[source.source_id])
+        return len(saved)
+
+    async def _save(self, items: list[tuple[str, SourceExtraction]]) -> None:
+        if not items:
+            return
+        stmt = insert(EntityExtractionRow).values([
+            {"run_id": self.log.run_id, "source_id": sid, "extraction": ext.model_dump(mode="json")}
+            for sid, ext in items]).on_conflict_do_nothing()
+        async with self.log.sessionmaker() as session:
+            await session.execute(stmt)
+            await session.commit()
 
     def graph(self) -> EntityGraph:
         ordered = [self.collected[i] for i in self.assigned if i in self.collected]
@@ -198,6 +224,10 @@ async def run_entity_wave(
     extraction = EntityExtraction(gateway, resolver, log, source_ids, max_chars=max_chars, concurrency=concurrency)
     if not extraction.assigned:
         return EntityGraph()
+    if restored := await extraction.load_checkpoints():
+        await log.progress(AGENT, f"resumed: {restored} source extraction(s) restored from checkpoint")
+    if len(extraction.collected) == len(extraction.assigned):
+        return extraction.graph()  # everything was extracted before the interruption
     wave = EntityWave(extraction, log)
     spec = entity_extractor_spec(gateway, make_extract_entities_tool(extraction, batch_size),
                                  len(extraction.assigned), batch_size)

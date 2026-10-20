@@ -85,7 +85,7 @@ def planner_rule(sneak_brief: bool = False, skip: str | None = None):
     return rule
 
 
-def researcher_rule(invent_ref: bool = False):
+def researcher_rule(invent_ref: bool = False, as_tool: bool = False):
     def rule(messages):
         last = messages[-1]
         if isinstance(last, HumanMessage):
@@ -101,7 +101,10 @@ def researcher_rule(invent_ref: bool = False):
             ]
             if invent_ref:
                 refs.append({"source_id": "src-000000000000", "kind": "web_page", "summary": "made up"})
-            return AIMessage(content=json.dumps({"sub_task_id": sub_task, "status": "Done", "refs": refs}))
+            result = {"sub_task_id": sub_task, "status": "Done", "refs": refs}
+            if as_tool:  # open models answer through a forced structured-output tool call
+                return ai_calls(tool_call("ResearchResult", result))
+            return AIMessage(content=json.dumps(result))
         return AIMessage(content="done")
 
     return rule
@@ -213,3 +216,20 @@ async def test_researchers_have_no_write_tools(committed_run):
     await run_research(agent, recorder, graph)
     assert offered == {"web_search", "read_file"}
     assert formats and all(f and f["json_schema"]["name"] == "ResearchResult" for f in formats)
+
+
+
+async def test_open_model_path_returns_results_through_a_structured_output_tool(committed_run):
+    """Open models get ToolStrategy: the researcher's answer arrives as a ResearchResult tool call."""
+    maker, _, run_id = committed_run
+    graph = TaskGraph(sub_tasks=[spec(1)])
+    log, scratch = RunLog(maker, run_id), ScratchStore(maker, run_id)
+    await persist_task_graph(maker, log, graph)
+    recorder = ResearchRecorder(maker, SourceResolver(scratch, None, uuid.uuid4()), log, graph.sub_tasks)
+    gw = FakeGateway({Role.PLANNER: RuleModel(rule=planner_rule()),
+                      Role.RESEARCHER: RuleModel(rule=researcher_rule(as_tool=True))}, output_strategy="tool")
+    tool = make_web_search_tool(make_researcher(maker, run_id))
+    agent = build_delegating_agent(gw, recorder, [web_researcher_spec(gw, tool, max_tool_calls=4)],
+                                   subtask_timeout_s=30)
+    [result] = await run_research(agent, recorder, graph)
+    assert result.status is SubTaskStatus.DONE and len(result.refs) == 2

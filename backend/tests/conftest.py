@@ -1,12 +1,19 @@
 import uuid
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from insightforge.config import get_settings
 from insightforge.store.models import Run, User
 from insightforge.store.qdrant import VectorStore, make_client
+
+
+@pytest.fixture(autouse=True)
+def _signing_secret(monkeypatch):
+    """Tests never depend on the developer's .env secrets (the API refuses to start without one)."""
+    monkeypatch.setattr(get_settings(), "jwt_secret", SecretStr("test-secret-" + "x" * 40))
 
 
 @pytest.fixture

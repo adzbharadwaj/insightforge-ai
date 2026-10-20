@@ -8,10 +8,11 @@ Single source of truth for where the build is. Update after every component.
 
 ## Resume here
 
-**Current phase:** 4 — Synthesis → report: **code + tests done (114 passing); live-verified COMPLETE twice; final tuning not yet re-verified live**
-**Blocked on:** OpenRouter credits (last run: HTTP 402 `in_flight_budget_exhausted`). Top up at openrouter.ai/settings/credits.
-**Next step:** one more live run of the payroll brief to confirm the last fixes (fact-check word windows, publisher-aware judge, budget-aware retry, entity cap): expect COMPLETE, ≤ 300k tokens, fact-check ≥ 80%. Then mark 4.x ✅, commit, start Phase 5 (API + SSE).
-Live slice: `cd backend && uv run insightforge "<brief>" [--pdf file.pdf ...] [--no-web]`
+**Current phase:** 6 — Scheduler done + **checkpointing at every stage and agent** (161 passing; resume verified live) → Phase 7 — Frontend
+**Next step:** rerun the watchlist E2E on Claude (API + worker + scheduler, `WATCHLIST_INTERVAL_OVERRIDE_S=240`; expect baseline then a diff/alert), then Phase 7 (Next.js).
+**Resume a failed run:** `uv run insightforge --resume <run-id>` · API `POST /research/{id}/retry` · the worker auto-resumes retryable failures once.
+**Models:** back on Claude (`anthropic/claude-sonnet-5.5` / `-haiku-5.5`). Cheap verified alternative in `.env` comments: `deepseek/deepseek-v4.1-flash` / `z-ai/glm-5.3-flash`.
+**Optional:** `brew install pango` to enable PDF export (otherwise `/export?format=pdf` returns 501 with this hint).
 
 ```bash
 docker compose up -d                 # Postgres, Redis, Qdrant (from repo root)
@@ -19,8 +20,10 @@ cd backend
 uv sync                              # Python 3.12 venv + deps
 uv run alembic upgrade head          # apply DB migrations
 uv run pytest -q                     # all tests should pass (DB tests skip if Postgres is down)
-uv run uvicorn insightforge.main:app --reload   # API on :8000, check /health
-uv run insightforge "<brief>"                    # CLI: plan + research one brief (needs keys)
+uv run uvicorn insightforge.main:app --reload   # API on :8000 (/docs, /health); needs JWT_SECRET
+uv run arq insightforge.worker.WorkerSettings    # run worker (separate process): executes queued runs
+uv run insightforge-scheduler                    # watchlist scheduler (separate process)
+uv run insightforge "<brief>" [--pdf f.pdf]      # CLI: one full run in-process (needs keys)
 ```
 
 ## Decisions locked in
@@ -70,19 +73,21 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started. Numbers in brackets are
 ### Phase 4 — Synthesis → report
 - ✅ 4.1 Synthesis + budget compressor [10] — `agents/synthesis.py`: resolve refs → per-source passage selection by embedding similarity to the sub-task (3/source) → one claim-extraction call per sub-task (`SubTaskClaims`, claim ↔ passage) → dedupe (same entities + same numbers + cosine ≥ 0.9; most credible source first) → confidence (conflict → LOW, 2+ independent publishers → HIGH, single ≥ 0.6 → MEDIUM) → rank (month → credibility → relevance to brief) → compress tail of largest section via SUMMARIZER until ≤ 6k tokens (drop as last resort), each cut logged (`kind="cut"`). Bundle carries `sources` (citation metadata) and each item's exact `passage` (citation drawer, never shown to the Writer)
 - ✅ 4.2 Writer + grounding check + retry [11, 03b] — `agents/writer.py`: model returns `WriterOutput` (sentences + evidence ids); code renders Markdown, `[Source: domain, date, credibility: x]`, `**Confidence: X**` from the bundle, Gaps. `guardrails/grounding.py`: deterministic (ids exist, numbers ⊆ cited evidence, uncited numbers, sections match, summary ≤ 150 words) + LLM entailment in batches of 15; retry with explicit constraints (max 2), then drop + note in Gaps. `guardrails/output.py` PII redaction (emails, +intl phones)
-- ✅ 4.3 Fact-Checker [12] (pass-rate fix verified offline only, see log) — `agents/fact_checker.py`: sample max(20%, 5) section claims (seeded), live re-fetch (stored copy fallback, recorded), 1–2 sentence windows → temp Qdrant `factcheck_{run}` → best cosine vs the claim's own sources ≥ 0.85, `[UNVERIFIED]` inline, collection always dropped. `store/reports.py` saves report + claims; session summary → `report_summaries`
+- ✅ 4.3 Fact-Checker [12] (live: 6/8 on run 15; target ≥ 80% assessed in Phase 8 eval) — `agents/fact_checker.py`: sample max(20%, 5) section claims (seeded), live re-fetch (stored copy fallback, recorded), 1–2 sentence windows → temp Qdrant `factcheck_{run}` → best cosine vs the claim's own sources ≥ 0.85, `[UNVERIFIED]` inline, collection always dropped. `store/reports.py` saves report + claims; session summary → `report_summaries`
 - Pipeline: `entities → synthesize → write ⇄ ground → fact_check → finalize`; per-stage tokens in `state.stage_tokens` and `orchestrator/tokens` run events
 
 ### Phase 5 — API + SSE
-- ⬜ 5.1 Input guardrails [03a]
-- ⬜ 5.2 Run queue (arq) [04]
-- ⬜ 5.3 `/research/run`, `/research/status` (SSE), clarification resume [15]
-- ⬜ 5.4 `/reports` list/get/export (PDF, md) + share links
+- ✅ 5.1 Input guardrails [03a] — `guardrails/input.py`: brief 10–500 chars after `clean_text`, injection scan → 422, source-pref sanity (docs ⇔ files, ≥ 1 source), PDF checks reused; LLM scope/policy check (`ScopeVerdict`: off-topic / private person / harmful) on a meter-less gateway; if the check can't run → 503, nothing queued (fail closed). Also: clarify answers are cleaned + injection-scanned
+- ✅ 5.2 Run queue (arq) [04] — `runtime.py` (shared by worker + CLI: pooled checkpointer, shared HTTP/Qdrant/provider/fetcher, per-run gateway whose meter resumes from `runs.tokens_used`), `worker.py` (`start_run` ingests uploads then runs, `resume_run`, cron `cancel_stale_clarifications` every minute using `runs.clarification_asked_at`; `max_jobs = max_concurrent_runs`, job timeout = budget + 120 s; skips runs cancelled while queued)
+- ✅ 5.3 Research API + SSE [15] — `api/research.py`: `POST /research/run` (multipart, 202 + ETA; per-user active-run cap 2 + 10/h Redis limit), `GET /research/{id}`, `GET /research/status/{id}` (SSE via `api/sse.py`: `snapshot` / `log` / `end`, resumes with `Last-Event-ID`, `?token=` for EventSource, progress only), `POST /{id}/clarify` (conditional update → one answer wins, 409 otherwise), `POST /{id}/cancel` (queued/waiting only). `api/auth.py` JWT (user scope, 24 h) + `POST /auth/dev-login` (dev only, `ALLOW_DEV_LOGIN`)
+- ✅ 5.4 Reports [15] — `api/reports.py`: list, get (`ReportView`: markdown + `structure` (sentences with evidence ids, for clickable citations) + sources + evidence passages + fact-check), export md / pdf (`export/render.py`, WeasyPrint lazy → 501 without pango), share links (`report:read` JWT, 7 days, `jti` revocation → 410; login tokens rejected on /share). Migration adds `reports.structure`, `runs.clarification_asked_at`
+- Not done here (Phase 8): Dockerfiles + compose services for api/worker/frontend
 
 ### Phase 6 — Scheduler
-- ⬜ 6.1 Watchlist CRUD + scheduler worker [20]
-- ⬜ 6.2 Diff Agent [21] + alerts
-- ⬜ 6.3 Webhook guard + Slack delivery [03d]
+- 🔨 6.0 Live E2E pending (see log)
+- ✅ 6.1 Watchlist CRUD + scheduler worker [20]
+- ✅ 6.2 Diff Agent [21] + alerts
+- ✅ 6.3 Webhook guard + Slack delivery [03d]
 
 ### Phase 7 — Frontend (Next.js)
 - ⬜ 7.1 Brief input panel
@@ -132,3 +137,19 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started. Numbers in brackets are
   - Grounding judge: reason before verdict (it had produced "unsupported" with reasons saying supported); sees each item's publisher (Writer attributes facts to publishers); superlatives the evidence doesn't state are unsupported. Writer: state facts directly, no "the evidence shows / one item states".
   - Fact-check: true atomic claims scored 0.82–0.85 against whole sentences. Claim-sized word windows (12/20/30 words) lifted 4 of 5 to 0.86–0.91 (measured offline on run `cf23ad40…` sources: 5/10 → 9/10). Threshold unchanged at 0.85.
   - Live results: run 11 COMPLETE 196 s / 231k tokens / fact-check 6/8; run 12 COMPLETE 256 s / 315k / 5/10 (before the window fix); run 13 FAILED on budget during a rewrite (→ budget-aware retry); run 14 stopped by OpenRouter 402 (credits).
+- 2026-10-20 — Committed Phase 4 (`39ec025`). **Phase 5 done** (132 passing). Smoke test with real processes: health ok; dev-login as the CLI user; 3 stored reports listed; report view with 86 evidence passages; md export; pdf → 501 (no pango); share link opens without login; SSE replay of a finished run (92 log + snapshot + end); arq worker boots with 3 functions; API and worker stop cleanly.
+  - `.env` had empty `JWT_SECRET` / `WEBHOOK_SIGNING_SECRET` (copied from `.env.example`). `config.require_secret` now rejects empty/placeholder/short secrets; the API checks at startup. Tests set their own secret (autouse fixture).
+  - Pausing for clarification now saves `tokens_used`, so a resume in another worker process continues the same budget.
+  - email-validator rejects reserved domains like `.local` (the CLI's dev user) → dev-login uses a format check instead.
+- 2026-10-20 — Secrets set in `.env` (64 chars each; API boots with real config). OpenRouter topped up. **Run 15 (Phase 4 live check):** COMPLETE 189 s, 230k tokens (plan 3k, research 77k, entities 70k, synthesis 20k, write 22k, ground 38k), 2 writer attempts, 94 entities, fact-check 6/8 (fails at 0.849 / 0.84, both paraphrases → `[UNVERIFIED]`). **README context-engineering example:** raw corpus ≈ 202,171 tokens in the scratch store; Planner received ≈ 1,561 tokens of references; Writer received a 3,666-token evidence bundle (budget 6,000). Report: `data/reports/fb6c74b1-5c5e-4408-ac27-29859d841a5c.md`.
+- 2026-10-20 — **Model experiment (open weights).** Probed OpenRouter: free models blocked by the account's privacy/ZDR guardrail (404). With native JSON alongside tools, GLM 5.3 Flash skipped its tool and invented an id; DeepSeek V4.1 Flash hung. Both work with a forced structured-output tool call → `Settings.agent_output_strategy` ("auto": provider for anthropic/*, tool otherwise). Run 16 on DeepSeek/GLM: COMPLETE 185 s, 140k tokens, 1 writer attempt, fact-check 7/8, ~1.5 ¢. But on the watchlist E2E, DeepSeek's writer took ~2.5 min per call; two rewrites hit the 480 s budget → FAILED (173k tokens). **Switched back to Claude.** `provider.require_parameters` is applied to open models only: on this account (zero data retention) it leaves no Claude host (404).
+- 2026-10-20 — **Phase 6 built** (152 passing): `guardrails/webhooks.py` (03d: HTTPS + public-IP check at save and at send, no redirects, HMAC-SHA256 `X-InsightForge-Signature` over `timestamp.body`, 10 s timeout, 3 attempts with backoff on 5xx/429/network, Slack format for hooks.slack.com), `agents/diff.py` (Diff Agent: embedding match; changed figures caught in code; ≥ 0.92 same numbers = rephrase; rest → one batched materiality call; first report = baseline), `watchlist/service.py` (start run per item with busy guard; `process_watch_result` → alert + webhook, called by the worker after a COMPLETE watchlist run), `watchlist/scheduler.py` (`insightforge-scheduler`: APScheduler, Postgres job store `apscheduler_jobs`, coalesce + max_instances=1 + misfire grace, reconcile every 60 s, new items fire immediately), `api/watchlist.py` (CRUD with brief guardrails + webhook check, run-now, latest diff, alert feed, mark read). Alembic ignores `apscheduler_jobs`. Fixed a test fixture that turned any OSError inside a test into a skip.
+  - Live check so far: scheduler booted, reconciled, picked up an API-created item and queued its run; the next firing was correctly skipped while that run was busy; SIGTERM shutdown clean. The run itself failed on the time budget (DeepSeek writer, see above), so the diff/alert step has not run live yet.
+  - **Open issue:** writer retries are budget-aware for tokens but not for time. (Fixed below.)
+- 2026-10-20 — **Switched back to Claude.** `provider.require_parameters` now applies to open models only (on this zero-data-retention account it left no Claude host → 404). Live smoke test passes.
+- 2026-10-20 — **Checkpointing (user requirement: a failed agent must not restart the run).**
+  - Stage level: LangGraph saves state after every stage; `execute(..., None)` resumes from the last one, `durability="sync"` (written before the next stage starts). Failures are classified: time budget / provider errors → `retryable`; planning errors, no evidence, token budget → not auto-retried.
+  - Agent level: each researcher's Done `ResearchResult` → `sub_tasks.result`; each source's extraction → `entity_extractions`. A resumed research stage re-delegates only unfinished/failed sub-tasks; a resumed entity wave extracts only missing sources. `persist_task_graph` is idempotent.
+  - Entry points: `Runtime.retry` (fresh time + token budget for the attempt; `runs.attempts` counts up; no checkpoint → start over), worker auto-resume (`max_auto_resumes=1`) and `retry_run` job, `POST /research/{id}/retry` (FAILED only, ≤ `max_run_attempts`=3, conditional update), CLI `--resume RUN_ID`.
+  - Time-aware rewrites: `execute` sets a deadline; stages record `stage_seconds`; `ground` skips a rewrite when another write + grounding check (+ 90 s fact-check reserve) won't fit, dropping unsupported claims instead.
+  - **Live proof (run 17, Claude):** attempt 1 with `RUN_TIME_BUDGET_S=100` died during writing after plan/research/entities/synthesis (164k tokens of work). `--resume` → attempt 2 re-ran only write/ground/fact_check (3 writer attempts, 0 unsupported at the end) → COMPLETE in 125 s; finished stages untouched (identical stage token counts), ~62% of the run's tokens reused.

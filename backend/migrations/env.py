@@ -1,11 +1,10 @@
 import asyncio
 from logging.config import fileConfig
 
+from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
-
-from alembic import context
 
 from insightforge.config import get_settings
 from insightforge.store.models import Base
@@ -28,10 +27,14 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+EXTERNALLY_OWNED = ("checkpoint", "apscheduler_jobs")
+
+
 def include_object(obj, name, type_, reflected, compare_to) -> bool:
-    """LangGraph's AsyncPostgresSaver owns the checkpoint_* tables (created by saver.setup()).
-    Without this, autogenerate would emit DROP TABLE for them and wipe paused runs."""
-    return not (type_ == "table" and reflected and compare_to is None and name.startswith("checkpoint"))
+    """Tables created by libraries, not by our models: LangGraph's checkpoint_* (AsyncPostgresSaver.setup())
+    and APScheduler's apscheduler_jobs. Without this, autogenerate would emit DROP TABLE for them and wipe
+    paused runs and schedules."""
+    return not (type_ == "table" and reflected and compare_to is None and name.startswith(EXTERNALLY_OWNED))
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:

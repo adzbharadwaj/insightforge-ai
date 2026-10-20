@@ -14,6 +14,7 @@ Two steps, both owned by the Planner:
 from deepagents import FilesystemMiddleware, SubAgent, create_deep_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ModelFallbackMiddleware, TodoListMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from insightforge.agents.delegation import SUBAGENT_FOR_SOURCE, DelegationMiddleware, Ledger, ResearchRecorder
@@ -73,6 +74,8 @@ async def persist_task_graph(
     sessionmaker: async_sessionmaker[AsyncSession], log: RunLog, graph: TaskGraph
 ) -> None:
     async with sessionmaker() as session:
+        # Idempotent: if planning re-runs on resume (it failed after saving), the new plan replaces the old.
+        await session.execute(delete(SubTask).where(SubTask.run_id == log.run_id))
         session.add_all(
             SubTask(
                 run_id=log.run_id,
@@ -119,6 +122,12 @@ def delegation_message(assignments: list[tuple[str, str]]) -> str:
 
 
 async def run_research(agent, recorder: ResearchRecorder, graph: TaskGraph) -> list[ResearchResult]:
-    assignments = [(t.id, SUBAGENT_FOR_SOURCE[t.source_type]) for t in graph.sub_tasks]
-    await agent.ainvoke({"messages": [HumanMessage(delegation_message(assignments))]})
+    restored = await recorder.load_checkpoints()
+    if restored:
+        await recorder.log.progress("planner", f"resumed: {len(restored)} sub-task(s) restored from checkpoint",
+                                    sub_task_ids=restored)
+    pending = recorder.pending()
+    if pending:
+        assignments = [(t.id, SUBAGENT_FOR_SOURCE[t.source_type]) for t in pending]
+        await agent.ainvoke({"messages": [HumanMessage(delegation_message(assignments))]})
     return await recorder.finalize()

@@ -132,7 +132,7 @@ async def test_clarification_survives_a_real_postgres_checkpoint(committed_run):
     """Pause, drop the pipeline object, rebuild it, and resume from Postgres: state must round-trip."""
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-    from insightforge.cli import checkpointer_url
+    from insightforge.runtime import checkpointer_url
 
     maker, user_id, run_id = committed_run
 

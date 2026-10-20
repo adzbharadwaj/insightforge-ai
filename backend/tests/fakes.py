@@ -45,8 +45,11 @@ def ai_calls(*calls: dict) -> AIMessage:
 
 
 class FakeGateway(ModelGateway):
-    def __init__(self, models: dict[Role, BaseChatModel], structured: dict[Role, Callable[[Any], Any]] | None = None):
-        super().__init__(Settings(_env_file=None, openrouter_api_key="sk-test"))
+    def __init__(self, models: dict[Role, BaseChatModel], structured: dict[Role, Callable[[Any], Any]] | None = None,
+                 output_strategy: str = "provider"):
+        # Agent-wiring tests script the final answer as JSON content (provider strategy) unless they opt in to
+        # the forced-tool-call path that open models use.
+        super().__init__(Settings(_env_file=None, openrouter_api_key="sk-test", agent_output_strategy=output_strategy))
         self.models = models
         self.structured_fns = structured or {}
 

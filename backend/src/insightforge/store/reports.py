@@ -23,7 +23,9 @@ async def save_report(
     checks = {c.claim_id: c for c in fact_check.checks}
     report = Report(run_id=run_id, user_id=user_id, title=draft.report.title, markdown=markdown,
                     evidence_bundle=bundle.model_dump(mode="json"),
-                    factcheck_summary=fact_check.model_dump(mode="json"))
+                    factcheck_summary=fact_check.model_dump(mode="json"),
+                    structure={"report": draft.report.model_dump(mode="json"),
+                               "claims": [c.model_dump(mode="json") for c in draft.claims]})
     report.claims = [
         Claim(claim_key=c.claim_id, section=c.section, text=c.text, evidence_ids=c.evidence_ids,
               sampled=c.claim_id in checks,

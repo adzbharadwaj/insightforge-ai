@@ -17,6 +17,10 @@ class RunLog:
         self._sessionmaker = sessionmaker
         self.run_id = run_id
 
+    @property
+    def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
+        return self._sessionmaker
+
     async def emit(self, agent: str, kind: str, message: str, **data: Any) -> None:
         async with self._sessionmaker() as session:
             session.add(RunEvent(run_id=self.run_id, agent=agent, kind=kind, message=message, data=data))

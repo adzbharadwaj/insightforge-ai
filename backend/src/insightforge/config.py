@@ -28,9 +28,16 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_app_url: str = "http://localhost:3000"
     openrouter_app_name: str = "InsightForge AI"
-    # Slugs verified against openrouter.ai/api/v1/models (both support tool calling).
+    # Slugs verified against openrouter.ai/api/v1/models and probed with the pipeline's call patterns
+    # (JSON-schema output; tool-calling agent). Cheap open-weight alternative, also verified:
+    # deepseek/deepseek-v4.1-flash / z-ai/glm-5.3-flash (agent_output_strategy "auto" handles both).
     model_primary: str = "anthropic/claude-sonnet-5.5"
     model_secondary: str = "anthropic/claude-haiku-5.5"
+    # How agents with tools return their typed answer. "provider" = native JSON schema (needed for
+    # Claude, which rejects forced tool_choice); "tool" = a forced structured-output tool call (open
+    # models: with native JSON alongside tools, GLM skipped its tools and DeepSeek hung). "auto" picks
+    # per model: provider for anthropic/*, tool otherwise.
+    agent_output_strategy: Literal["auto", "provider", "tool"] = "auto"
     llm_max_retries: int = 1  # per-role timeouts live in llm/gateway.py ROLE_SPECS
 
     # --- Embeddings (local FastEmbed) ---
@@ -52,6 +59,11 @@ class Settings(BaseSettings):
     # grounding ~20k); each writer retry adds ~34k. 300k fits the 2 allowed retries with margin.
     run_token_budget: int = 300_000
     max_writer_retries: int = 2
+    # A failed run resumes from its last checkpoint (the stage that failed re-runs; finished stages and
+    # finished researchers/extractions are kept). The worker does this automatically for retryable failures
+    # (time budget, provider errors) this many times; users can retry up to max_run_attempts in total.
+    max_auto_resumes: int = 1
+    max_run_attempts: int = 3
     max_concurrent_runs: int = 4
     clarification_timeout_s: int = 30 * 60
 
@@ -84,8 +96,37 @@ class Settings(BaseSettings):
 
     # --- Security ---
     jwt_secret: SecretStr = SecretStr("change-me-in-env")
+    access_token_ttl_hours: int = 24
     share_link_ttl_days: int = 7
+    # Local development only: POST /auth/dev-login issues a token for any email. Off in production,
+    # where tokens come from the identity provider.
+    allow_dev_login: bool = True
+    app_base_url: str = "http://localhost:3000"  # frontend origin, used in share links and CORS
+
+    # --- Watchlist (scheduler) ---
+    watchlist_interval_override_s: int | None = None  # set e.g. 60 for demos: every item runs every minute
+    scheduler_reconcile_s: int = 60  # how often the scheduler syncs its jobs with the watchlist table
+    scheduler_misfire_grace_s: int = 3600  # a run missed while the scheduler was down still fires within this
+
+    # --- API limits ---
+    runs_per_hour_per_user: int = 10
+    max_active_runs_per_user: int = 2
     webhook_signing_secret: SecretStr = SecretStr("change-me-in-env")
+
+
+PLACEHOLDER_SECRETS = {"", "change-me-in-env"}
+MIN_SECRET_CHARS = 32
+
+
+def require_secret(value: SecretStr, name: str) -> str:
+    """A signing secret that is actually secret. Checked where it is used (API startup, webhooks), so the
+    CLI and worker run without one."""
+    secret = value.get_secret_value()
+    if secret in PLACEHOLDER_SECRETS or len(secret) < MIN_SECRET_CHARS:
+        raise RuntimeError(
+            f"{name} must be set in .env to at least {MIN_SECRET_CHARS} random characters. Generate one with:\n"
+            "  openssl rand -base64 48")
+    return secret
 
 
 @lru_cache

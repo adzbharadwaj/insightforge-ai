@@ -109,9 +109,11 @@ class Run(Base):
     source_prefs: Mapped[dict] = mapped_column(JSONB, default=dict)  # {"web": bool, "docs": bool, "memory": bool}
     status: Mapped[RunStatus] = mapped_column(_enum(RunStatus, "run_status"), default=RunStatus.QUEUED)
     clarifying_question: Mapped[str | None] = mapped_column(Text)
+    clarification_asked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 30-min timeout
     clarification_answer: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     tokens_used: Mapped[int] = mapped_column(Integer, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, default=1, server_default="1")  # 1 + resumes from checkpoint
     entity_graph: Mapped[dict | None] = mapped_column(JSONB)  # EntityGraph from wave 2 (component 09)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = _created()
@@ -139,10 +141,24 @@ class SubTask(Base):
     )
     summary: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
+    # The researcher's validated ResearchResult: an agent-level checkpoint. A resumed research stage
+    # re-delegates only sub-tasks without one.
+    result: Mapped[dict | None] = mapped_column(JSONB)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     run: Mapped[Run] = relationship(back_populates="sub_tasks")
+
+
+class EntityExtractionRow(Base):
+    """One source's entity extraction: an agent-level checkpoint for wave 2 (resume skips done sources)."""
+
+    __tablename__ = "entity_extractions"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    extraction: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = _created()
 
 
 class RunEvent(Base):
@@ -208,6 +224,8 @@ class Report(Base):
     markdown: Mapped[str] = mapped_column(Text)
     evidence_bundle: Mapped[dict] = mapped_column(JSONB)
     factcheck_summary: Mapped[dict | None] = mapped_column(JSONB)
+    # WriterOutput (sentences with evidence ids) + claim ids: lets the UI make each citation clickable.
+    structure: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = _created()
 
     claims: Mapped[list["Claim"]] = relationship(back_populates="report", cascade="all, delete-orphan")

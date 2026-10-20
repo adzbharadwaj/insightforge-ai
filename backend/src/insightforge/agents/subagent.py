@@ -1,14 +1,15 @@
 """Shared builder for isolated subagents spawned through the Planner's `task` tool.
 
 Every subagent gets the same guard rails: only the tools it is given plus read-only
-`read_file`, a hard tool-call limit, a fallback model, and a typed final answer via
-provider-native JSON schema (OpenRouter's Claude models reject the forced tool_choice
-that ToolStrategy needs).
+`read_file`, a hard tool-call limit, a fallback model, and a typed final answer. How that
+answer is produced depends on the model (ModelGateway.agent_output_strategy): native JSON
+schema for Claude (which rejects forced tool_choice), a forced structured-output tool call
+for open models (which, given native JSON alongside tools, skipped or stalled on their tools).
 """
 
 from deepagents import FilesystemMiddleware, SubAgent
 from langchain.agents.middleware import ModelFallbackMiddleware, ToolCallLimitMiddleware
-from langchain.agents.structured_output import ProviderStrategy
+from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
@@ -39,5 +40,6 @@ def isolated_subagent(
             ToolCallLimitMiddleware(run_limit=max_tool_calls, exit_behavior="end"),
             ModelFallbackMiddleware(gateway.fallback_model(role)),
         ],
-        "response_format": ProviderStrategy(response_schema),
+        "response_format": (ProviderStrategy(response_schema) if gateway.agent_output_strategy(role) == "provider"
+                            else ToolStrategy(response_schema)),
     }

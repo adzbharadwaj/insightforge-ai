@@ -14,6 +14,7 @@ graph (time) and inside the model gateway (tokens); a breach ends the run FAILED
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -56,6 +57,7 @@ from insightforge.store.sources import SourceResolver
 from insightforge.tools.fetch import PageFetcher
 
 logger = logging.getLogger(__name__)
+FACT_CHECK_RESERVE_S = 90  # re-fetching and embedding sources; kept free when deciding on a rewrite
 
 @dataclass(frozen=True)
 class RunContext:
@@ -82,6 +84,10 @@ class PipelineDeps:
     entity_loader: Callable[[uuid.UUID, str, int], Awaitable[list[str]]] | None = None  # (user_id, brief, n)
     extract_entities: bool = True
     fetcher: PageFetcher | None = None  # live re-fetch for the Fact-Checker; None → stored copies only
+    deadline: float | None = None  # time.monotonic() when this attempt's time budget ends (set by execute)
+
+    def seconds_left(self) -> float | None:
+        return None if self.deadline is None else self.deadline - time.monotonic()
 
     def context(self, run_id: uuid.UUID, user_id: uuid.UUID) -> RunContext:
         scratch = ScratchStore(self.sessionmaker, run_id)
@@ -124,7 +130,7 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
         )
         if graph.clarifying_question:
             await set_run(deps, state.run_id, status=RunStatus.AWAITING_CLARIFICATION,
-                          clarifying_question=graph.clarifying_question)
+                          clarifying_question=graph.clarifying_question, clarification_asked_at=datetime.now(UTC))
             await log.progress("planner", "asked a clarifying question", question=graph.clarifying_question)
             return {"task_graph": graph, "status": RunStatus.AWAITING_CLARIFICATION}
         await persist_task_graph(deps.sessionmaker, log, graph)
@@ -205,7 +211,7 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
     async def ground(state: PipelineState) -> dict:
         await set_run(deps, state.run_id, status=RunStatus.GROUNDING)
         meter = deps.gateway.meter
-        before = meter.total if meter else 0
+        before, ground_started = (meter.total if meter else 0), time.monotonic()
         result = await check_grounding(deps.gateway, state.draft, state.evidence_bundle)
         log = RunLog(deps.sessionmaker, state.run_id)
         await log.progress("grounding", f"attempt {state.writer_attempts}: "
@@ -214,14 +220,20 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
         if result.ok:
             return {"grounding": result}
         if state.writer_attempts <= s.max_writer_retries:
-            # Another attempt costs about one write plus one grounding check. If the budget can't cover it,
-            # degrade (drop the unsupported claims) rather than fail a nearly finished run on the budget.
-            retry_cost = (state.stage_tokens.get("write", 0) / max(1, state.writer_attempts)
-                          + ((meter.total if meter else 0) - before))
-            if meter is None or meter.remaining > retry_cost * 1.2:
+            # Another attempt costs about one write plus one grounding check, in tokens and in time. If either
+            # budget can't cover it, degrade (drop the unsupported claims) rather than fail a nearly finished run.
+            retry_tokens = (state.stage_tokens.get("write", 0) / max(1, state.writer_attempts)
+                            + ((meter.total if meter else 0) - before))
+            retry_seconds = (state.stage_seconds.get("write", 0) / max(1, state.writer_attempts)
+                             + (time.monotonic() - ground_started))
+            left = deps.seconds_left()
+            tokens_ok = meter is None or meter.remaining > retry_tokens * 1.2
+            time_ok = left is None or left > retry_seconds * 1.2 + FACT_CHECK_RESERVE_S
+            if tokens_ok and time_ok:
                 return {"grounding": result}
-            await log.emit("grounding", "retry", f"skipping rewrite: ~{retry_cost:,.0f} tokens needed, "
-                                                 f"{meter.remaining:,} left in the run budget")
+            reason = (f"~{retry_tokens:,.0f} tokens needed, {meter.remaining:,} left" if not tokens_ok else
+                      f"~{retry_seconds:.0f}s needed (+{FACT_CHECK_RESERVE_S}s for fact-checking), {left:.0f}s left")
+            await log.emit("grounding", "retry", f"skipping rewrite: {reason} in the run budget")
         # Retries exhausted (or unaffordable): fail safe by removing what the evidence does not support.
         cleaned = drop_unsupported(state.draft, result, state.evidence_bundle)
         await log.emit("grounding", "cut", f"removed {len(result.unsupported_claim_ids)} unsupported claim(s)",
@@ -272,13 +284,14 @@ def build_pipeline(deps: PipelineDeps, checkpointer: BaseCheckpointSaver | None 
         return "fact_check" if state.grounding.ok else "write"
 
     def staged(name: str, fn):
-        """Record the tokens each stage uses (summed across write/ground retries)."""
+        """Record the tokens and seconds each stage uses (summed across write/ground retries)."""
         async def node(state: PipelineState) -> dict:
             meter = deps.gateway.meter
-            before = meter.total if meter else 0
+            before, started = (meter.total if meter else 0), time.monotonic()
             update = dict(await fn(state) or {})
             used = (meter.total if meter else 0) - before
             update["stage_tokens"] = {name: state.stage_tokens.get(name, 0) + used}
+            update["stage_seconds"] = {name: round(state.stage_seconds.get(name, 0) + time.monotonic() - started, 1)}
             # Logged as each stage ends, so a run that fails later still shows where its tokens went.
             await RunLog(deps.sessionmaker, state.run_id).emit(
                 "orchestrator", "tokens", f"{name}: {used:,} tokens", stage=name, tokens=used,
@@ -316,34 +329,42 @@ class RunOutcome:
     status: RunStatus
     state: dict
     question: str | None = None
+    retryable: bool = False  # a resume from the last checkpoint could succeed (time budget, provider error)
 
 
 async def execute(
     pipeline,
     deps: PipelineDeps,
     run_id: uuid.UUID,
-    graph_input: dict | Command,
+    graph_input: dict | Command | None,
 ) -> RunOutcome:
-    """Run (or resume) one pipeline run to its next stop: done, failed, or awaiting clarification.
+    """Run, resume, or retry one pipeline run to its next stop: done, failed, or awaiting clarification.
 
-    Enforces the run time budget and turns budget breaches and planner errors into a FAILED run
-    with a clear message, never a hang or an unhandled crash.
+    `graph_input=None` resumes from the last checkpoint: every stage saves one when it finishes
+    (durability="sync": written before the next stage starts), so a retry re-runs only the stage
+    that failed. Enforces the run time budget (per attempt) and turns budget breaches and planner
+    errors into a FAILED run with a clear message, never a hang or an unhandled crash.
     """
     config = {"configurable": {"thread_id": str(run_id)}, "recursion_limit": 25}
+    budget = deps.settings.run_time_budget_s
+    deps.deadline = time.monotonic() + budget
     try:
-        state = await asyncio.wait_for(pipeline.ainvoke(graph_input, config), deps.settings.run_time_budget_s)
+        state = await asyncio.wait_for(pipeline.ainvoke(graph_input, config, durability="sync"), budget)
     except TimeoutError:
-        return await _fail(deps, run_id, f"run exceeded its time budget of {deps.settings.run_time_budget_s}s")
+        return await _fail(deps, run_id, f"run exceeded its time budget of {budget}s", retryable=True)
     except TokenBudgetExceeded as exc:
         return await _fail(deps, run_id, f"token budget exceeded: {exc}")
     except PlanningError as exc:
         return await _fail(deps, run_id, f"planning failed: {exc}")
-    except Exception as exc:  # any other error (provider 4xx, bug) ends the run FAILED, never a crash
+    except Exception as exc:  # any other error (provider 4xx/5xx, bug) ends the run FAILED, never a crash
         logger.exception("run %s failed with an unexpected error", run_id)
-        return await _fail(deps, run_id, f"unexpected error: {type(exc).__name__}: {str(exc)[:500]}")
+        return await _fail(deps, run_id, f"unexpected error: {type(exc).__name__}: {str(exc)[:500]}", retryable=True)
 
     if "__interrupt__" in state:
         question = state["__interrupt__"][0].value["question"]
+        meter = deps.gateway.meter
+        if meter:  # the resume may run in another process; it continues from this count
+            await set_run(deps, run_id, tokens_used=meter.total)
         return RunOutcome(RunStatus.AWAITING_CLARIFICATION, state, question)
 
     status = RunStatus(state["status"])
@@ -354,9 +375,9 @@ async def execute(
     return RunOutcome(status, state)
 
 
-async def _fail(deps: PipelineDeps, run_id: uuid.UUID, error: str) -> RunOutcome:
+async def _fail(deps: PipelineDeps, run_id: uuid.UUID, error: str, retryable: bool = False) -> RunOutcome:
     meter = deps.gateway.meter
     await set_run(deps, run_id, status=RunStatus.FAILED, error=error, finished_at=datetime.now(UTC),
                   tokens_used=meter.total if meter else 0)
-    await RunLog(deps.sessionmaker, run_id).emit("orchestrator", "error", error)
-    return RunOutcome(RunStatus.FAILED, {}, None)
+    await RunLog(deps.sessionmaker, run_id).emit("orchestrator", "error", error, retryable=retryable)
+    return RunOutcome(RunStatus.FAILED, {}, None, retryable=retryable)
